@@ -31,7 +31,7 @@ def cluster_phases(df,
               .mean().unstack("_s").reindex(columns=range(n_slots)))
 
     ids = V_wide.index.to_numpy()
-    V   = V_wide.to_numpy(dtype=float)
+    V   = V_wide.to_numpy(dtype=float, copy=True)
 
     # impute missing slots per device
     gap = np.isnan(V)
