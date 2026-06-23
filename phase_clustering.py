@@ -92,8 +92,8 @@ def plot_phase_voltages(df1, df2, phase,
 
     fig.autofmt_xdate()
     fig.tight_layout()
-    plt.close(fig)
-    return fig, corr
+    plt.show()
+    return corr
 
 
 def affinity(V, gap):
