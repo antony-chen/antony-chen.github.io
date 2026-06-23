@@ -1,6 +1,7 @@
 import warnings; warnings.filterwarnings("ignore")
 import numpy as np
 import pandas as pd
+import matplotlib.pyplot as plt
 from sklearn.cluster import SpectralClustering
 from sklearn.preprocessing import StandardScaler
 
@@ -62,6 +63,30 @@ def cluster_phases(df,
                            "PHASE_CONFIDENCE": confidence.round(4),
                            "IS_SUSPECT_LABEL": suspect})
     return df.merge(result, on=device_col, how="left")
+
+
+def plot_phase_voltages(df1, df2, phase,
+                        time_col="timestamp_cst",
+                        voltage_col="DATA",
+                        phase_col="PHASE_CHILD",
+                        label1="Dataset 1",
+                        label2="Dataset 2"):
+    s1 = df1[df1[phase_col] == phase].groupby(time_col)[voltage_col].mean().sort_index()
+    s2 = df2[df2[phase_col] == phase].groupby(time_col)[voltage_col].mean().sort_index()
+
+    common = s1.index.intersection(s2.index)
+    corr = s1.reindex(common).corr(s2.reindex(common)) if len(common) > 1 else float("nan")
+
+    fig, ax = plt.subplots(figsize=(14, 5))
+    ax.plot(s1.index, s1.values, linewidth=0.8, label=label1, alpha=0.8)
+    ax.plot(s2.index, s2.values, linewidth=0.8, label=label2, alpha=0.8)
+    ax.set_xlabel("Timestamp (CST)")
+    ax.set_ylabel("Voltage")
+    ax.set_title(f"Phase {phase} — Pearson r = {corr:.4f}")
+    ax.legend()
+    fig.autofmt_xdate()
+    fig.tight_layout()
+    return fig, corr
 
 
 def affinity(V, gap):
