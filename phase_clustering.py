@@ -84,8 +84,15 @@ def plot_phase_voltages(df1, df2, phase,
     ax.set_ylabel("Voltage")
     ax.set_title(f"Phase {phase} — Pearson r = {corr:.4f}")
     ax.legend()
+
+    all_vals = np.concatenate([s1.values, s2.values])
+    vmin, vmax = np.nanmin(all_vals), np.nanmax(all_vals)
+    margin = (vmax - vmin) * 0.05 or 0.5
+    ax.set_ylim(vmin - margin, vmax + margin)
+
     fig.autofmt_xdate()
     fig.tight_layout()
+    plt.close(fig)
     return fig, corr
 
 
