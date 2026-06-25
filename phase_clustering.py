@@ -100,6 +100,59 @@ def plot_phase_voltages(df1, df2, phase,
     return corr
 
 
+def phase_correlation_matrix(df1, df2,
+                             time_col="timestamp_cst",
+                             voltage_col="DATA",
+                             phase_col="PHASE_CHILD",
+                             label1="Device 1",
+                             label2="Device 2",
+                             phases=("A", "B", "C")):
+    phases = list(phases)
+    n = len(phases)
+    labels = [f"{label1} {p}" for p in phases] + [f"{label2} {p}" for p in phases]
+
+    series = []
+    for df in (df1, df2):
+        for p in phases:
+            d = df[(df[phase_col] == p) & df[voltage_col].notna() & (df[voltage_col] > 0)]
+            s = d.groupby(time_col)[voltage_col].mean().sort_index()
+            series.append(s)
+
+    common = series[0].index
+    for s in series[1:]:
+        common = common.intersection(s.index)
+
+    mat = pd.DataFrame(np.nan, index=labels, columns=labels)
+    for i, si in enumerate(series):
+        for j, sj in enumerate(series):
+            if len(common) > 1:
+                mat.iloc[i, j] = si.reindex(common).corr(sj.reindex(common))
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+    im = ax.imshow(mat.values.astype(float), cmap="RdBu_r", vmin=-1, vmax=1)
+    ax.set_xticks(range(len(labels)))
+    ax.set_yticks(range(len(labels)))
+    ax.set_xticklabels(labels, rotation=45, ha="right")
+    ax.set_yticklabels(labels)
+
+    for i in range(len(labels)):
+        for j in range(len(labels)):
+            val = mat.iloc[i, j]
+            if not np.isnan(val):
+                color = "white" if abs(val) > 0.7 else "black"
+                ax.text(j, i, f"{val:.2f}", ha="center", va="center",
+                        fontsize=9, color=color)
+
+    ax.axhline(n - 0.5, color="black", linewidth=1.5)
+    ax.axvline(n - 0.5, color="black", linewidth=1.5)
+
+    fig.colorbar(im, ax=ax, label="Pearson r")
+    ax.set_title(f"Cross-Phase Correlation: {label1} vs {label2}")
+    fig.tight_layout()
+    plt.show()
+    return mat
+
+
 def affinity(V, gap):
     """
     N×N affinity matrix: 70% first-difference + 30% raw voltage correlation.
