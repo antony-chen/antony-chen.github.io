@@ -173,7 +173,7 @@ def phase_correlation_matrix(df1, df2,
                 mat.loc[p1, p2] = a.corr(b)
 
     fig, ax = plt.subplots(figsize=(6, 5))
-    im = ax.imshow(mat.values.astype(float), cmap="RdBu_r", vmin=-1, vmax=1)
+    im = ax.imshow(mat.values.astype(float), cmap="RdYlGn", vmin=-1, vmax=1)
     ax.set_xticks(range(len(phases)))
     ax.set_yticks(range(len(phases)))
     ax.set_xticklabels(phases)
