@@ -65,6 +65,12 @@ def cluster_phases(df,
     return df.merge(result, on=device_col, how="left")
 
 
+def _drop_outliers(s, k=3.0):
+    q1, q3 = s.quantile(0.25), s.quantile(0.75)
+    iqr = q3 - q1
+    return s[(s >= q1 - k * iqr) & (s <= q3 + k * iqr)]
+
+
 def plot_phase_voltages(df1, df2, phase,
                         time_col="timestamp_cst",
                         voltage_col="DATA",
@@ -75,6 +81,8 @@ def plot_phase_voltages(df1, df2, phase,
     d2 = df2[(df2[phase_col] == phase) & df2[voltage_col].notna() & (df2[voltage_col] > 0)]
     s1 = d1.groupby(time_col)[voltage_col].mean().sort_index()
     s2 = d2.groupby(time_col)[voltage_col].mean().sort_index()
+    s1 = _drop_outliers(s1)
+    s2 = _drop_outliers(s2)
 
     common = s1.index.intersection(s2.index)
     corr = s1.reindex(common).corr(s2.reindex(common)) if len(common) > 1 else float("nan")
