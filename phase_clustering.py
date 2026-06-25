@@ -108,46 +108,39 @@ def phase_correlation_matrix(df1, df2,
                              label2="Device 2",
                              phases=("A", "B", "C")):
     phases = list(phases)
-    n = len(phases)
-    labels = [f"{label1} {p}" for p in phases] + [f"{label2} {p}" for p in phases]
+    s1, s2 = {}, {}
+    for p in phases:
+        d = df1[(df1[phase_col] == p) & df1[voltage_col].notna() & (df1[voltage_col] > 0)]
+        s1[p] = d.groupby(time_col)[voltage_col].mean().sort_index()
+        d = df2[(df2[phase_col] == p) & df2[voltage_col].notna() & (df2[voltage_col] > 0)]
+        s2[p] = d.groupby(time_col)[voltage_col].mean().sort_index()
 
-    series = []
-    for df in (df1, df2):
-        for p in phases:
-            d = df[(df[phase_col] == p) & df[voltage_col].notna() & (df[voltage_col] > 0)]
-            s = d.groupby(time_col)[voltage_col].mean().sort_index()
-            series.append(s)
-
-    common = series[0].index
-    for s in series[1:]:
-        common = common.intersection(s.index)
-
-    mat = pd.DataFrame(np.nan, index=labels, columns=labels)
-    for i, si in enumerate(series):
-        for j, sj in enumerate(series):
+    mat = pd.DataFrame(np.nan, index=phases, columns=phases)
+    for p1 in phases:
+        for p2 in phases:
+            common = s1[p1].index.intersection(s2[p2].index)
             if len(common) > 1:
-                mat.iloc[i, j] = si.reindex(common).corr(sj.reindex(common))
+                mat.loc[p1, p2] = s1[p1].reindex(common).corr(s2[p2].reindex(common))
 
-    fig, ax = plt.subplots(figsize=(8, 6))
+    fig, ax = plt.subplots(figsize=(6, 5))
     im = ax.imshow(mat.values.astype(float), cmap="RdBu_r", vmin=-1, vmax=1)
-    ax.set_xticks(range(len(labels)))
-    ax.set_yticks(range(len(labels)))
-    ax.set_xticklabels(labels, rotation=45, ha="right")
-    ax.set_yticklabels(labels)
+    ax.set_xticks(range(len(phases)))
+    ax.set_yticks(range(len(phases)))
+    ax.set_xticklabels(phases)
+    ax.set_yticklabels(phases)
+    ax.set_xlabel(label2)
+    ax.set_ylabel(label1)
 
-    for i in range(len(labels)):
-        for j in range(len(labels)):
+    for i in range(len(phases)):
+        for j in range(len(phases)):
             val = mat.iloc[i, j]
             if not np.isnan(val):
                 color = "white" if abs(val) > 0.7 else "black"
-                ax.text(j, i, f"{val:.2f}", ha="center", va="center",
-                        fontsize=9, color=color)
-
-    ax.axhline(n - 0.5, color="black", linewidth=1.5)
-    ax.axvline(n - 0.5, color="black", linewidth=1.5)
+                ax.text(j, i, f"{val:.3f}", ha="center", va="center",
+                        fontsize=11, color=color)
 
     fig.colorbar(im, ax=ax, label="Pearson r")
-    ax.set_title(f"Cross-Phase Correlation: {label1} vs {label2}")
+    ax.set_title(f"Phase Correlation: {label1} vs {label2}")
     fig.tight_layout()
     plt.show()
     return mat
