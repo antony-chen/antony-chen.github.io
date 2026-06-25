@@ -161,9 +161,9 @@ def phase_correlation_matrix(df1, df2,
     s1, s2 = {}, {}
     for p in phases:
         d = df1[(df1[phase_col] == p) & df1[voltage_col].notna() & (df1[voltage_col] > 0)]
-        s1[p] = d.groupby(time_col)[voltage_col].mean().sort_index()
+        s1[p] = _drop_outliers(d.groupby(time_col)[voltage_col].mean().sort_index())
         d = df2[(df2[phase_col] == p) & df2[voltage_col].notna() & (df2[voltage_col] > 0)]
-        s2[p] = d.groupby(time_col)[voltage_col].mean().sort_index()
+        s2[p] = _drop_outliers(d.groupby(time_col)[voltage_col].mean().sort_index())
 
     mat = pd.DataFrame(np.nan, index=phases, columns=phases)
     for p1 in phases:
