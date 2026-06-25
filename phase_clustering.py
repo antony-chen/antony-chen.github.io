@@ -82,14 +82,16 @@ def _drop_outliers(s, k=3.0):
     return s[(s >= q1 - k * iqr) & (s <= q3 + k * iqr)]
 
 
-def plot_phase_voltages(df1, df2, phase,
+def plot_phase_voltages(df1, df2, phase1, phase2=None,
                         time_col="timestamp_cst",
                         voltage_col="DATA",
                         phase_col="PHASE_CHILD",
                         label1="Dataset 1",
                         label2="Dataset 2"):
-    d1 = df1[(df1[phase_col] == phase) & df1[voltage_col].notna() & (df1[voltage_col] > 0)]
-    d2 = df2[(df2[phase_col] == phase) & df2[voltage_col].notna() & (df2[voltage_col] > 0)]
+    if phase2 is None:
+        phase2 = phase1
+    d1 = df1[(df1[phase_col] == phase1) & df1[voltage_col].notna() & (df1[voltage_col] > 0)]
+    d2 = df2[(df2[phase_col] == phase2) & df2[voltage_col].notna() & (df2[voltage_col] > 0)]
     s1 = d1.groupby(time_col)[voltage_col].mean().sort_index()
     s2 = d2.groupby(time_col)[voltage_col].mean().sort_index()
     s1 = _drop_outliers(s1)
@@ -125,7 +127,8 @@ def plot_phase_voltages(df1, df2, phase,
 
     ax.set_xlabel("Timestamp (CST)")
     ax.set_ylabel("Voltage")
-    ax.set_title(f"Phase {phase} — Pearson r = {corr:.4f}")
+    phase_label = f"Phase {phase1}" if phase1 == phase2 else f"Phase {phase1} vs {phase2}"
+    ax.set_title(f"{phase_label} — Pearson r = {corr:.4f}")
     ax.legend()
 
     all_vals = np.concatenate([s1.values, s2.values])
@@ -139,12 +142,12 @@ def plot_phase_voltages(df1, df2, phase,
     ax.set_ylim(vmin - margin, vmax + margin)
 
     if neg_periods:
-        print(f"\n[phase {phase}] {len(neg_periods)} negatively correlated period(s):")
+        print(f"\n[{phase_label}] {len(neg_periods)} negatively correlated period(s):")
         for i, (start, end) in enumerate(neg_periods, 1):
             seg_corr = s1.loc[start:end].corr(s2.loc[start:end]) if len(s1.loc[start:end]) > 1 else float("nan")
             print(f"  {i}. {start}  →  {end}   (r = {seg_corr:.3f})")
     else:
-        print(f"\n[phase {phase}] No negatively correlated periods found.")
+        print(f"\n[{phase_label}] No negatively correlated periods found.")
 
     plt.show()
     return corr
