@@ -84,12 +84,36 @@ def plot_phase_voltages(df1, df2, phase,
     s1 = _drop_outliers(s1)
     s2 = _drop_outliers(s2)
 
-    common = s1.index.intersection(s2.index)
+    common = s1.index.intersection(s2.index).sort_values()
     corr = s1.reindex(common).corr(s2.reindex(common)) if len(common) > 1 else float("nan")
+
+    # rolling correlation to find negatively correlated windows
+    window = min(SLOTS_PER_DAY, len(common))
+    neg_periods = []
+    if len(common) >= window:
+        v1 = s1.reindex(common)
+        v2 = s2.reindex(common)
+        rolling_corr = v1.rolling(window, center=True).corr(v2)
+        neg_mask = rolling_corr < -0.3
+        if neg_mask.any():
+            in_run = False
+            for idx, is_neg in neg_mask.items():
+                if is_neg and not in_run:
+                    run_start = idx
+                    in_run = True
+                elif not is_neg and in_run:
+                    neg_periods.append((run_start, idx))
+                    in_run = False
+            if in_run:
+                neg_periods.append((run_start, common[-1]))
 
     fig, ax = plt.subplots(figsize=(14, 5))
     ax.plot(s1.index, s1.values, linewidth=0.8, label=label1, alpha=0.8)
     ax.plot(s2.index, s2.values, linewidth=0.8, label=label2, alpha=0.8)
+
+    for start, end in neg_periods:
+        ax.axvspan(start, end, color="red", alpha=0.1)
+
     ax.set_xlabel("Timestamp (CST)")
     ax.set_ylabel("Voltage")
     ax.set_title(f"Phase {phase} — Pearson r = {corr:.4f}")
@@ -104,6 +128,17 @@ def plot_phase_voltages(df1, df2, phase,
     fig.autofmt_xdate()
     fig.tight_layout()
     ax.set_ylim(vmin - margin, vmax + margin)
+
+    if neg_periods:
+        print(f"\n[phase {phase}] {len(neg_periods)} negatively correlated period(s):")
+        for i, (start, end) in enumerate(neg_periods, 1):
+            seg1 = s1.reindex(common).loc[start:end]
+            seg2 = s2.reindex(common).loc[start:end]
+            seg_corr = seg1.corr(seg2) if len(seg1) > 1 else float("nan")
+            print(f"  {i}. {start}  →  {end}   (r = {seg_corr:.3f})")
+    else:
+        print(f"\n[phase {phase}] No negatively correlated periods found.")
+
     plt.show()
     return corr
 
