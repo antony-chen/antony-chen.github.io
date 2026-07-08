@@ -76,6 +76,18 @@ def align_intervals(s1, s2, freq="15min"):
     return s1.reindex(common), s2.reindex(common)
 
 
+def _filter_time(df, time_col, start_time, end_time):
+    if start_time is None and end_time is None:
+        return df
+    t = pd.to_datetime(df[time_col])
+    mask = pd.Series(True, index=df.index)
+    if start_time is not None:
+        mask &= t >= pd.Timestamp(start_time)
+    if end_time is not None:
+        mask &= t <= pd.Timestamp(end_time)
+    return df[mask]
+
+
 def _drop_outliers(s, k=3.0):
     q1, q3 = s.quantile(0.25), s.quantile(0.75)
     iqr = q3 - q1
@@ -87,9 +99,13 @@ def plot_phase_voltages(df1, df2, phase1, phase2=None,
                         voltage_col="DATA",
                         phase_col="PHASE_CHILD",
                         label1="Dataset 1",
-                        label2="Dataset 2"):
+                        label2="Dataset 2",
+                        start_time=None,
+                        end_time=None):
     if phase2 is None:
         phase2 = phase1
+    df1 = _filter_time(df1, time_col, start_time, end_time)
+    df2 = _filter_time(df2, time_col, start_time, end_time)
     d1 = df1[(df1[phase_col] == phase1) & df1[voltage_col].notna() & (df1[voltage_col] > 0)]
     d2 = df2[(df2[phase_col] == phase2) & df2[voltage_col].notna() & (df2[voltage_col] > 0)]
     s1 = d1.groupby(time_col)[voltage_col].mean().sort_index()
@@ -159,7 +175,11 @@ def phase_correlation_matrix(df1, df2,
                              phase_col="PHASE_CHILD",
                              label1="Device 1",
                              label2="Device 2",
-                             phases=("A", "B", "C")):
+                             phases=("A", "B", "C"),
+                             start_time=None,
+                             end_time=None):
+    df1 = _filter_time(df1, time_col, start_time, end_time)
+    df2 = _filter_time(df2, time_col, start_time, end_time)
     phases = list(phases)
     s1, s2 = {}, {}
     for p in phases:
