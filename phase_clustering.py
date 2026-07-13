@@ -177,7 +177,11 @@ def phase_correlation_matrix(df1, df2,
                              label2="Device 2",
                              phases=("A", "B", "C"),
                              start_time=None,
-                             end_time=None):
+                             end_time=None,
+                             csv_path=None,
+                             mslink1=None,
+                             mslink2=None,
+                             feeder=None):
     df1 = _filter_time(df1, time_col, start_time, end_time)
     df2 = _filter_time(df2, time_col, start_time, end_time)
     phases = list(phases)
@@ -216,6 +220,24 @@ def phase_correlation_matrix(df1, df2,
     ax.set_title(f"Phase Correlation: {label1} vs {label2}")
     fig.tight_layout()
     plt.show()
+
+    if csv_path is not None:
+        import os
+        phase_cols = [f"{p1}-{p2}" for p1 in phases for p2 in phases]
+        row = {"mslink_upstream": mslink1, "device_upstream": label1,
+               "mslink_downstream": mslink2, "device_downstream": label2,
+               "feeder": feeder}
+        for col in phase_cols:
+            p1, p2 = col.split("-")
+            row[col] = mat.loc[p1, p2] if (p1 in mat.index and p2 in mat.columns) else np.nan
+        row_df = pd.DataFrame([row])
+        if os.path.exists(csv_path):
+            existing_cols = pd.read_csv(csv_path, nrows=0).columns.tolist()
+            row_df = row_df.reindex(columns=existing_cols)
+            row_df.to_csv(csv_path, mode="a", header=False, index=False)
+        else:
+            row_df.to_csv(csv_path, index=False)
+
     return mat
 
 
