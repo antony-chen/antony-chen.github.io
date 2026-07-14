@@ -256,13 +256,12 @@ def analyze_correlations(csv_path, phases=("A", "B", "C")):
     """
     df = pd.read_csv(csv_path)
     phases = list(phases)
-    matching = [f"{p}-{p}" for p in phases]
-    cross    = [(f"{p1}-{p2}", p1, p2) for p1 in phases for p2 in phases if p1 != p2]
+    cross  = [(f"{p1}-{p2}", p1, p2) for p1 in phases for p2 in phases if p1 != p2]
 
-    total = unexpected_count = 0
+    mslink_cols = ["mslink_upstream", "mslink_downstream"]
+    unexpected_rows, expected_rows = [], []
 
     for _, row in df.iterrows():
-        total += 1
         flags = []
         for col, p1, p2 in cross:
             if pd.isna(row.get(col)):
@@ -278,24 +277,26 @@ def analyze_correlations(csv_path, phases=("A", "B", "C")):
 
         up   = f"{row.get('device_upstream', '?')} ({row.get('mslink_upstream', '?')})"
         down = f"{row.get('device_downstream', '?')} ({row.get('mslink_downstream', '?')})"
+        pair = row[mslink_cols].to_dict()
 
         if flags:
-            unexpected_count += 1
+            unexpected_rows.append(pair)
             print(f"[UNEXPECTED] {up}  →  {down}")
             for f in flags:
                 print(f"    {f}")
         else:
+            expected_rows.append(pair)
             print(f"[ok]         {up}  →  {down}")
 
+    total = len(unexpected_rows) + len(expected_rows)
     print(f"\n── Summary ────────────────────────────────────────────")
     print(f"  Total pairs:       {total}")
-    print(f"  Expected:          {total - unexpected_count}")
-    print(f"  Unexpected:        {unexpected_count} "
-          f"({100 * unexpected_count / total:.1f}% of pairs)" if total else "")
+    print(f"  Expected:          {len(expected_rows)}")
+    print(f"  Unexpected:        {len(unexpected_rows)}"
+          + (f" ({100 * len(unexpected_rows) / total:.1f}% of pairs)" if total else ""))
     print(f"───────────────────────────────────────────────────────")
 
-    return {"total": total, "unexpected": unexpected_count,
-            "expected": total - unexpected_count}
+    return pd.DataFrame(unexpected_rows), pd.DataFrame(expected_rows)
 
 
 def affinity(V, gap):
