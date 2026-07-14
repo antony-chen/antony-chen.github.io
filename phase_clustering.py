@@ -243,6 +243,61 @@ def phase_correlation_matrix(df1, df2,
     return mat
 
 
+def analyze_correlations(csv_path, phases=("A", "B", "C")):
+    """
+    Read the CSV produced by phase_correlation_matrix and report pairs where
+    any cross-phase correlation exceeds either of its matching-phase correlations.
+
+    A cross-phase pair p1-p2 (p1 != p2) is flagged as unexpected when:
+        corr(p1-p2) > corr(p1-p1)  OR  corr(p1-p2) > corr(p2-p2)
+
+    i.e. the non-matching correlation is stronger than the same-phase baseline
+    for either device, which suggests a possible phase mislabel or wiring error.
+    """
+    df = pd.read_csv(csv_path)
+    phases = list(phases)
+    matching = [f"{p}-{p}" for p in phases]
+    cross    = [(f"{p1}-{p2}", p1, p2) for p1 in phases for p2 in phases if p1 != p2]
+
+    total = unexpected_count = 0
+
+    for _, row in df.iterrows():
+        total += 1
+        flags = []
+        for col, p1, p2 in cross:
+            if pd.isna(row.get(col)):
+                continue
+            c_cross  = float(row[col])
+            c_match1 = float(row.get(f"{p1}-{p1}", float("nan")))
+            c_match2 = float(row.get(f"{p2}-{p2}", float("nan")))
+            if c_cross > c_match1 or c_cross > c_match2:
+                flags.append(
+                    f"{col}: r={c_cross:.3f} "
+                    f"(vs {p1}-{p1}={c_match1:.3f}, {p2}-{p2}={c_match2:.3f})"
+                )
+
+        up   = f"{row.get('device_upstream', '?')} ({row.get('mslink_upstream', '?')})"
+        down = f"{row.get('device_downstream', '?')} ({row.get('mslink_downstream', '?')})"
+
+        if flags:
+            unexpected_count += 1
+            print(f"[UNEXPECTED] {up}  →  {down}")
+            for f in flags:
+                print(f"    {f}")
+        else:
+            print(f"[ok]         {up}  →  {down}")
+
+    print(f"\n── Summary ────────────────────────────────────────────")
+    print(f"  Total pairs:       {total}")
+    print(f"  Expected:          {total - unexpected_count}")
+    print(f"  Unexpected:        {unexpected_count} "
+          f"({100 * unexpected_count / total:.1f}% of pairs)" if total else "")
+    print(f"───────────────────────────────────────────────────────")
+
+    return {"total": total, "unexpected": unexpected_count,
+            "expected": total - unexpected_count}
+
+
 def affinity(V, gap):
     """
     N×N affinity matrix: 70% first-difference + 30% raw voltage correlation.
