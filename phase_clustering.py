@@ -217,7 +217,9 @@ def phase_correlation_matrix(df1, df2,
                         fontsize=11, color=color)
 
     fig.colorbar(im, ax=ax, label="Pearson r")
-    ax.set_title(f"Phase Correlation: {label1} vs {label2}")
+    t1 = f"{label1} ({mslink1})" if mslink1 is not None else label1
+    t2 = f"{label2} ({mslink2})" if mslink2 is not None else label2
+    ax.set_title(f"Phase Correlation: {t1} vs {t2}")
     fig.tight_layout()
     plt.show()
 
