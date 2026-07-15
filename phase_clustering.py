@@ -299,6 +299,99 @@ def analyze_correlations(csv_path, phases=("A", "B", "C")):
     return pd.DataFrame(unexpected_rows), pd.DataFrame(expected_rows)
 
 
+def rank_phase_mismatches(csv_path, phases=("A", "B", "C")):
+    """
+    Rank unexpected device pairs by mismatch confidence.
+
+    Confidence is the mean per-phase excess — for each upstream phase p,
+    how much does the best cross-phase correlation beat the matching one:
+
+        excess(p) = max(corr(p-q) for q != p) - corr(p-p)
+
+    confidence = mean(excess(p)) across phases where corr(p-p) is available.
+
+    A high positive value means the cross-phase signal dominates the diagonal
+    strongly and consistently, giving high confidence that the labels are wrong.
+    The suggested re-mapping shows what the data actually implies for each phase.
+    """
+    df = pd.read_csv(csv_path)
+    phases = list(phases)
+
+    cross_pairs = [(f"{p1}-{p2}", p1, p2) for p1 in phases for p2 in phases if p1 != p2]
+
+    records = []
+    for _, row in df.iterrows():
+        # build the correlation matrix for this pair from CSV columns
+        mat = {}
+        for p1 in phases:
+            for p2 in phases:
+                val = row.get(f"{p1}-{p2}", float("nan"))
+                mat[(p1, p2)] = float(val) if not pd.isna(val) else float("nan")
+
+        # skip pairs with no unexpected correlations (same filter as analyze_correlations)
+        is_unexpected = any(
+            not np.isnan(mat[(p1, p2)]) and
+            not np.isnan(mat[(p1, p1)]) and
+            not np.isnan(mat[(p2, p2)]) and
+            (mat[(p1, p2)] > mat[(p1, p1)] or mat[(p1, p2)] > mat[(p2, p2)])
+            for _, p1, p2 in cross_pairs
+        )
+        if not is_unexpected:
+            continue
+
+        # per-phase excess and suggested true mapping
+        excesses = []
+        suggested_map = {}
+        for p1 in phases:
+            diag = mat.get((p1, p1), float("nan"))
+            if np.isnan(diag):
+                continue
+            cross_vals = {p2: mat.get((p1, p2), float("nan"))
+                          for p2 in phases if p2 != p1}
+            best_p2  = max(cross_vals, key=lambda p: cross_vals[p]
+                           if not np.isnan(cross_vals[p]) else -np.inf)
+            best_val = cross_vals[best_p2]
+            if np.isnan(best_val):
+                continue
+            excess = best_val - diag
+            excesses.append(excess)
+            suggested_map[p1] = best_p2 if excess > 0 else p1
+
+        if not excesses:
+            continue
+
+        confidence = float(np.mean(excesses))
+        mapping_str = "  ".join(f"{p}→{suggested_map.get(p, p)}" for p in phases)
+
+        records.append({
+            "mslink_upstream":   row.get("mslink_upstream"),
+            "device_upstream":   row.get("device_upstream"),
+            "mslink_downstream": row.get("mslink_downstream"),
+            "device_downstream": row.get("device_downstream"),
+            "feeder":            row.get("feeder"),
+            "confidence":        round(confidence, 4),
+            "suggested_mapping": mapping_str,
+        })
+
+    if not records:
+        print("No unexpected pairs found in CSV.")
+        return pd.DataFrame()
+
+    result = (pd.DataFrame(records)
+                .sort_values("confidence", ascending=False)
+                .reset_index(drop=True))
+
+    print("── Phase Mismatch Rankings ─────────────────────────────────────────────")
+    for i, r in result.iterrows():
+        up   = f"{r['device_upstream']} ({r['mslink_upstream']})"
+        down = f"{r['device_downstream']} ({r['mslink_downstream']})"
+        print(f"  #{i+1:>3}  confidence={r['confidence']:+.4f}  {up}  →  {down}")
+        print(f"         suggested: {r['suggested_mapping']}")
+    print("────────────────────────────────────────────────────────────────────────")
+
+    return result
+
+
 def affinity(V, gap):
     """
     N×N affinity matrix: 70% first-difference + 30% raw voltage correlation.
