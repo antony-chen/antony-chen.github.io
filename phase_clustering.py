@@ -251,14 +251,23 @@ def analyze_correlations(csv_path, phases=("A", "B", "C")):
     A cross-phase pair p1-p2 (p1 != p2) is flagged as unexpected when:
         corr(p1-p2) > corr(p1-p1)  OR  corr(p1-p2) > corr(p2-p2)
 
-    i.e. the non-matching correlation is stronger than the same-phase baseline
-    for either device, which suggests a possible phase mislabel or wiring error.
+    Returns a DataFrame of trusted devices — those that appear only in expected
+    pairs and have at least one downstream comparison. Devices are removed from
+    the trusted list when:
+      - they appear in any unexpected pair (either role), or
+      - they have no downstream comparisons (cannot be validated).
     """
     df = pd.read_csv(csv_path)
     phases = list(phases)
     cross  = [(f"{p1}-{p2}", p1, p2) for p1 in phases for p2 in phases if p1 != p2]
 
-    mslink_cols = ["mslink_upstream", "mslink_downstream"]
+    # all unique devices seen in the CSV
+    all_mslinks = set(df["mslink_upstream"].dropna()) | set(df["mslink_downstream"].dropna())
+    # devices that appear in at least one pair (both roles count)
+    compared = set(df["mslink_upstream"].dropna()) | set(df["mslink_downstream"].dropna())
+    # devices flagged in any unexpected pair
+    flagged = set()
+
     unexpected_rows, expected_rows = [], []
 
     for _, row in df.iterrows():
@@ -275,11 +284,14 @@ def analyze_correlations(csv_path, phases=("A", "B", "C")):
                     f"(vs {p1}-{p1}={c_match1:.3f}, {p2}-{p2}={c_match2:.3f})"
                 )
 
-        up   = f"{row.get('device_upstream', '?')} ({row.get('mslink_upstream', '?')})"
-        down = f"{row.get('device_downstream', '?')} ({row.get('mslink_downstream', '?')})"
-        pair = row[mslink_cols].to_dict()
+        up_mslink   = row.get("mslink_upstream")
+        down_mslink = row.get("mslink_downstream")
+        up   = f"{row.get('device_upstream', '?')} ({up_mslink})"
+        down = f"{row.get('device_downstream', '?')} ({down_mslink})"
+        pair = {"mslink_upstream": up_mslink, "mslink_downstream": down_mslink}
 
         if flags:
+            flagged.update(m for m in (up_mslink, down_mslink) if pd.notna(m))
             unexpected_rows.append(pair)
             print(f"[UNEXPECTED] {up}  →  {down}")
             for f in flags:
@@ -288,15 +300,25 @@ def analyze_correlations(csv_path, phases=("A", "B", "C")):
             expected_rows.append(pair)
             print(f"[ok]         {up}  →  {down}")
 
+    # devices with no comparisons (not upstream in any row, or only appear once)
+    has_downstream = set(df["mslink_upstream"].dropna())
+    no_comparisons = all_mslinks - compared  # always empty given how compared is built,
+    # but also remove devices that never appear as upstream (can't be validated)
+    unvalidated = all_mslinks - has_downstream
+
+    trusted = all_mslinks - flagged - unvalidated
+
     total = len(unexpected_rows) + len(expected_rows)
     print(f"\n── Summary ────────────────────────────────────────────")
     print(f"  Total pairs:       {total}")
     print(f"  Expected:          {len(expected_rows)}")
     print(f"  Unexpected:        {len(unexpected_rows)}"
           + (f" ({100 * len(unexpected_rows) / total:.1f}% of pairs)" if total else ""))
+    print(f"  Trusted devices:   {len(trusted)} / {len(all_mslinks)}")
     print(f"───────────────────────────────────────────────────────")
 
-    return pd.DataFrame(unexpected_rows), pd.DataFrame(expected_rows)
+    trusted_df = pd.DataFrame(sorted(trusted), columns=["mslink"])
+    return trusted_df
 
 
 def rank_phase_mismatches(csv_path, phases=("A", "B", "C")):
