@@ -261,12 +261,12 @@ def analyze_correlations(csv_path, phases=("A", "B", "C")):
     phases = list(phases)
     cross  = [(f"{p1}-{p2}", p1, p2) for p1 in phases for p2 in phases if p1 != p2]
 
-    # all unique devices seen in the CSV
     all_mslinks = set(df["mslink_upstream"].dropna()) | set(df["mslink_downstream"].dropna())
-    # devices that appear in at least one pair (both roles count)
-    compared = set(df["mslink_upstream"].dropna()) | set(df["mslink_downstream"].dropna())
-    # devices flagged in any unexpected pair
-    flagged = set()
+
+    # rule 1: upstream device removed if any downstream comparison is unexpected
+    bad_upstream   = set()
+    # rule 2: downstream device removed if it appears in any unexpected pair
+    bad_downstream = set()
 
     unexpected_rows, expected_rows = [], []
 
@@ -291,7 +291,8 @@ def analyze_correlations(csv_path, phases=("A", "B", "C")):
         pair = {"mslink_upstream": up_mslink, "mslink_downstream": down_mslink}
 
         if flags:
-            flagged.update(m for m in (up_mslink, down_mslink) if pd.notna(m))
+            if pd.notna(up_mslink):   bad_upstream.add(up_mslink)
+            if pd.notna(down_mslink): bad_downstream.add(down_mslink)
             unexpected_rows.append(pair)
             print(f"[UNEXPECTED] {up}  →  {down}")
             for f in flags:
@@ -300,13 +301,11 @@ def analyze_correlations(csv_path, phases=("A", "B", "C")):
             expected_rows.append(pair)
             print(f"[ok]         {up}  →  {down}")
 
-    # devices with no comparisons (not upstream in any row, or only appear once)
+    # rule 3: devices that never act as upstream have no downstream comparisons to validate
     has_downstream = set(df["mslink_upstream"].dropna())
-    no_comparisons = all_mslinks - compared  # always empty given how compared is built,
-    # but also remove devices that never appear as upstream (can't be validated)
-    unvalidated = all_mslinks - has_downstream
+    unvalidated    = all_mslinks - has_downstream
 
-    trusted = all_mslinks - flagged - unvalidated
+    trusted = all_mslinks - bad_upstream - bad_downstream - unvalidated
 
     total = len(unexpected_rows) + len(expected_rows)
     print(f"\n── Summary ────────────────────────────────────────────")
