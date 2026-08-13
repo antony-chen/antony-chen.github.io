@@ -325,12 +325,37 @@ def analyze_correlations(csv_path, phases=("A", "B", "C")):
             print(f"[MISMATCHED] {up}  →  {down}  ({mapping_str})")
 
     total = len(matching_rows) + len(mismatched_rows) + len(confusing_rows)
-    pct = lambda n: f" ({100*n/total:.1f}%)" if total else ""
+    pct = lambda n, d: f" ({100*n/d:.1f}%)" if d else ""
     print(f"\n── Summary ─────────────────────────────────────────────")
     print(f"  Total pairs:    {total}")
-    print(f"  Matching:       {len(matching_rows)}{pct(len(matching_rows))}")
-    print(f"  Mismatched:     {len(mismatched_rows)}{pct(len(mismatched_rows))}")
-    print(f"  Confusing:      {len(confusing_rows)}{pct(len(confusing_rows))}")
+    print(f"  Matching:       {len(matching_rows)}{pct(len(matching_rows), total)}")
+    print(f"  Mismatched:     {len(mismatched_rows)}{pct(len(mismatched_rows), total)}")
+    print(f"  Confusing:      {len(confusing_rows)}{pct(len(confusing_rows), total)}")
+
+    # per-feeder breakdown
+    all_rows = (
+        [{"feeder": r.get("feeder"), "cat": "matching"}   for r in matching_rows]
+      + [{"feeder": r.get("feeder"), "cat": "mismatched"} for r in mismatched_rows]
+      + [{"feeder": r.get("feeder"), "cat": "confusing"}  for r in confusing_rows]
+    )
+    feeder_df = pd.DataFrame(all_rows)
+    feeders = sorted(feeder_df["feeder"].dropna().unique())
+    if feeders:
+        print(f"\n  Per-feeder breakdown:")
+        col_w = max(len(str(f)) for f in feeders)
+        header = f"  {'Feeder':<{col_w}}   {'Total':>5}   {'Matching':>8}   {'Mismatched':>10}   {'Confusing':>9}"
+        print(f"  {header}")
+        print(f"  {'-' * (len(header) - 2)}")
+        for feeder in feeders:
+            sub = feeder_df[feeder_df["feeder"] == feeder]
+            n   = len(sub)
+            nm  = (sub["cat"] == "matching").sum()
+            nw  = (sub["cat"] == "mismatched").sum()
+            nc  = (sub["cat"] == "confusing").sum()
+            print(f"  {str(feeder):<{col_w}}   {n:>5}"
+                  f"   {nm:>4}{pct(nm, n):>5}"
+                  f"   {nw:>6}{pct(nw, n):>5}"
+                  f"   {nc:>5}{pct(nc, n):>5}")
     print(f"────────────────────────────────────────────────────────")
 
     return {
