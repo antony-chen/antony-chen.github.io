@@ -245,79 +245,99 @@ def phase_correlation_matrix(df1, df2,
 
 def analyze_correlations(csv_path, phases=("A", "B", "C")):
     """
-    Read the CSV produced by phase_correlation_matrix and report pairs where
-    any cross-phase correlation exceeds either of its matching-phase correlations.
+    Categorize each device pair in the CSV into one of three groups based on
+    how the per-phase correlations align:
 
-    A cross-phase pair p1-p2 (p1 != p2) is flagged as unexpected when:
-        corr(p1-p2) > corr(p1-p1)  OR  corr(p1-p2) > corr(p2-p2)
+    matching   — diagonal dominates: each upstream phase has its highest
+                 correlation with the same-named downstream phase.
+    mismatched — clear one-to-one bijection, but the labels don't match
+                 (e.g. upstream-A correlates best with downstream-C, etc.).
+    confusing  — any of:
+                   • multiple upstream phases claim the same best downstream phase
+                   • max correlation for any upstream phase row is < 0.5
+                   • any matrix cell is missing
 
-    Returns a DataFrame of trusted devices — those that appear only in expected
-    pairs and have at least one downstream comparison. Devices are removed from
-    the trusted list when:
-      - they appear in any unexpected pair (either role), or
-      - they have no downstream comparisons (cannot be validated).
+    Returns a dict with keys "matching", "mismatched", "confusing", each
+    holding a DataFrame of the corresponding pairs.
     """
     df = pd.read_csv(csv_path)
     phases = list(phases)
-    cross  = [(f"{p1}-{p2}", p1, p2) for p1 in phases for p2 in phases if p1 != p2]
 
-    all_mslinks = set(df["mslink_upstream"].dropna()) | set(df["mslink_downstream"].dropna())
-
-    # rule 1: upstream device removed if any downstream comparison is unexpected
-    bad_upstream   = set()
-    # rule 2: downstream device removed if it appears in any unexpected pair
-    bad_downstream = set()
-
-    unexpected_rows, expected_rows = [], []
+    matching_rows, mismatched_rows, confusing_rows = [], [], []
 
     for _, row in df.iterrows():
-        flags = []
-        for col, p1, p2 in cross:
-            if pd.isna(row.get(col)):
-                continue
-            c_cross  = float(row[col])
-            c_match1 = float(row.get(f"{p1}-{p1}", float("nan")))
-            c_match2 = float(row.get(f"{p2}-{p2}", float("nan")))
-            if c_cross > c_match1 or c_cross > c_match2:
-                flags.append(
-                    f"{col}: r={c_cross:.3f} "
-                    f"(vs {p1}-{p1}={c_match1:.3f}, {p2}-{p2}={c_match2:.3f})"
-                )
-
         up_mslink   = row.get("mslink_upstream")
         down_mslink = row.get("mslink_downstream")
-        up   = f"{row.get('device_upstream', '?')} ({up_mslink})"
+        up   = f"{row.get('device_upstream',   '?')} ({up_mslink})"
         down = f"{row.get('device_downstream', '?')} ({down_mslink})"
-        pair = {"mslink_upstream": up_mslink, "mslink_downstream": down_mslink}
 
-        if flags:
-            if pd.notna(up_mslink):   bad_upstream.add(up_mslink)
-            if pd.notna(down_mslink): bad_downstream.add(down_mslink)
-            unexpected_rows.append(pair)
-            print(f"[UNEXPECTED] {up}  →  {down}")
-            for f in flags:
-                print(f"    {f}")
+        base = {
+            "mslink_upstream":   up_mslink,
+            "device_upstream":   row.get("device_upstream"),
+            "mslink_downstream": down_mslink,
+            "device_downstream": row.get("device_downstream"),
+            "feeder":            row.get("feeder"),
+        }
+
+        # build 3×3 matrix; flag any missing cells
+        mat, missing = {}, False
+        for p1 in phases:
+            for p2 in phases:
+                val = row.get(f"{p1}-{p2}", float("nan"))
+                mat[(p1, p2)] = float(val) if not pd.isna(val) else float("nan")
+                if pd.isna(mat[(p1, p2)]):
+                    missing = True
+
+        if missing:
+            confusing_rows.append({**base, "reason": "missing phase data"})
+            print(f"[CONFUSING]  {up}  →  {down}  (missing phase data)")
+            continue
+
+        # for each upstream phase, find which downstream phase it correlates best with
+        mapping, confusing, reason = {}, False, ""
+        for p1 in phases:
+            row_vals = {p2: mat[(p1, p2)] for p2 in phases}
+            best_p2  = max(row_vals, key=row_vals.get)
+            best_val = row_vals[best_p2]
+            if best_val < 0.5:
+                confusing = True
+                reason = f"low max correlation for phase {p1} (r={best_val:.3f})"
+                break
+            mapping[p1] = best_p2
+
+        if not confusing:
+            claimed = list(mapping.values())
+            dups = [p for p in phases if claimed.count(p) > 1]
+            if dups:
+                confusing = True
+                reason = f"phases {dups} claimed by multiple upstream phases"
+
+        mapping_str = "  ".join(f"{p}→{mapping.get(p, '?')}" for p in phases)
+
+        if confusing:
+            confusing_rows.append({**base, "reason": reason})
+            print(f"[CONFUSING]  {up}  →  {down}  ({reason})")
+        elif all(mapping[p] == p for p in phases):
+            matching_rows.append({**base, "mapping": mapping_str})
+            print(f"[MATCHING]   {up}  →  {down}  ({mapping_str})")
         else:
-            expected_rows.append(pair)
-            print(f"[ok]         {up}  →  {down}")
+            mismatched_rows.append({**base, "mapping": mapping_str})
+            print(f"[MISMATCHED] {up}  →  {down}  ({mapping_str})")
 
-    # rule 3: devices that never act as upstream have no downstream comparisons to validate
-    has_downstream = set(df["mslink_upstream"].dropna())
-    unvalidated    = all_mslinks - has_downstream
+    total = len(matching_rows) + len(mismatched_rows) + len(confusing_rows)
+    pct = lambda n: f" ({100*n/total:.1f}%)" if total else ""
+    print(f"\n── Summary ─────────────────────────────────────────────")
+    print(f"  Total pairs:    {total}")
+    print(f"  Matching:       {len(matching_rows)}{pct(len(matching_rows))}")
+    print(f"  Mismatched:     {len(mismatched_rows)}{pct(len(mismatched_rows))}")
+    print(f"  Confusing:      {len(confusing_rows)}{pct(len(confusing_rows))}")
+    print(f"────────────────────────────────────────────────────────")
 
-    trusted = all_mslinks - bad_upstream - bad_downstream - unvalidated
-
-    total = len(unexpected_rows) + len(expected_rows)
-    print(f"\n── Summary ────────────────────────────────────────────")
-    print(f"  Total pairs:       {total}")
-    print(f"  Expected:          {len(expected_rows)}")
-    print(f"  Unexpected:        {len(unexpected_rows)}"
-          + (f" ({100 * len(unexpected_rows) / total:.1f}% of pairs)" if total else ""))
-    print(f"  Trusted devices:   {len(trusted)} / {len(all_mslinks)}")
-    print(f"───────────────────────────────────────────────────────")
-
-    trusted_df = pd.DataFrame(sorted(trusted), columns=["mslink"])
-    return trusted_df
+    return {
+        "matching":   pd.DataFrame(matching_rows),
+        "mismatched": pd.DataFrame(mismatched_rows),
+        "confusing":  pd.DataFrame(confusing_rows),
+    }
 
 
 def rank_phase_mismatches(csv_path, phases=("A", "B", "C")):
