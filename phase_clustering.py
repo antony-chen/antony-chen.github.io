@@ -357,33 +357,28 @@ def analyze_correlations(csv_path, phases=("A", "B", "C")):
                   f"   {nw:>6}{pct(nw, n):>5}"
                   f"   {nc:>5}{pct(nc, n):>5}")
 
-        # write device CSV for feeders with no mismatched pairs
+        # write a single device CSV for all feeders with no mismatched pairs
         from pathlib import Path
         input_path = Path(csv_path)
-        written = []
-        for feeder in feeders:
-            sub = feeder_df[feeder_df["feeder"] == feeder]
-            if (sub["cat"] == "mismatched").sum() > 0:
-                continue
-            feeder_src = df[df["feeder"] == feeder]
-            ups   = feeder_src[["mslink_upstream",   "device_upstream"]].rename(
-                        columns={"mslink_upstream":   "mslink", "device_upstream":   "device"})
-            downs = feeder_src[["mslink_downstream", "device_downstream"]].rename(
-                        columns={"mslink_downstream": "mslink", "device_downstream": "device"})
-            devices = (pd.concat([ups, downs])
+        clean_feeders = [f for f in feeders
+                         if (feeder_df[feeder_df["feeder"] == f]["cat"] == "mismatched").sum() == 0]
+        if clean_feeders:
+            pieces = []
+            for feeder in clean_feeders:
+                feeder_src = df[df["feeder"] == feeder]
+                ups   = feeder_src[["mslink_upstream",   "device_upstream"]].rename(
+                            columns={"mslink_upstream":   "mslink", "device_upstream":   "device"})
+                downs = feeder_src[["mslink_downstream", "device_downstream"]].rename(
+                            columns={"mslink_downstream": "mslink", "device_downstream": "device"})
+                pieces.append(pd.concat([ups, downs]).assign(feeder=feeder))
+            devices = (pd.concat(pieces)
                          .dropna(subset=["mslink"])
                          .drop_duplicates("mslink")
-                         .assign(feeder=feeder)
                          .reset_index(drop=True))
-            safe = str(feeder).replace("/", "_").replace(" ", "_")
-            out  = input_path.parent / f"{input_path.stem}__{safe}_devices.csv"
+            out = input_path.parent / f"{input_path.stem}__devices.csv"
             devices.to_csv(out, index=False)
-            written.append((feeder, len(devices), out.name))
-
-        if written:
-            print(f"\n  Device CSVs written (feeders with no mismatched pairs):")
-            for feeder, n_dev, fname in written:
-                print(f"    {feeder}: {n_dev} devices  →  {fname}")
+            print(f"\n  {len(devices)} devices from {len(clean_feeders)} clean feeder(s) "
+                  f"({', '.join(str(f) for f in clean_feeders)})  →  {out.name}")
     print(f"────────────────────────────────────────────────────────")
 
     return {
