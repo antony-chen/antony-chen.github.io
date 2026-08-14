@@ -361,7 +361,8 @@ def analyze_correlations(csv_path, phases=("A", "B", "C")):
         from pathlib import Path
         input_path = Path(csv_path)
         clean_feeders = [f for f in feeders
-                         if (feeder_df[feeder_df["feeder"] == f]["cat"] == "mismatched").sum() == 0]
+                         if (feeder_df[feeder_df["feeder"] == f]["cat"] == "mismatched").sum() == 0
+                         and (feeder_df[feeder_df["feeder"] == f]["cat"] == "matching").sum() >= 1]
         if clean_feeders:
             pieces = []
             for feeder in clean_feeders:
