@@ -356,6 +356,34 @@ def analyze_correlations(csv_path, phases=("A", "B", "C")):
                   f"   {nm:>4}{pct(nm, n):>5}"
                   f"   {nw:>6}{pct(nw, n):>5}"
                   f"   {nc:>5}{pct(nc, n):>5}")
+
+        # write device CSV for feeders with no mismatched pairs
+        from pathlib import Path
+        input_path = Path(csv_path)
+        written = []
+        for feeder in feeders:
+            sub = feeder_df[feeder_df["feeder"] == feeder]
+            if (sub["cat"] == "mismatched").sum() > 0:
+                continue
+            feeder_src = df[df["feeder"] == feeder]
+            ups   = feeder_src[["mslink_upstream",   "device_upstream"]].rename(
+                        columns={"mslink_upstream":   "mslink", "device_upstream":   "device"})
+            downs = feeder_src[["mslink_downstream", "device_downstream"]].rename(
+                        columns={"mslink_downstream": "mslink", "device_downstream": "device"})
+            devices = (pd.concat([ups, downs])
+                         .dropna(subset=["mslink"])
+                         .drop_duplicates("mslink")
+                         .assign(feeder=feeder)
+                         .reset_index(drop=True))
+            safe = str(feeder).replace("/", "_").replace(" ", "_")
+            out  = input_path.parent / f"{input_path.stem}__{safe}_devices.csv"
+            devices.to_csv(out, index=False)
+            written.append((feeder, len(devices), out.name))
+
+        if written:
+            print(f"\n  Device CSVs written (feeders with no mismatched pairs):")
+            for feeder, n_dev, fname in written:
+                print(f"    {feeder}: {n_dev} devices  →  {fname}")
     print(f"────────────────────────────────────────────────────────")
 
     return {
