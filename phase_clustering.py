@@ -268,8 +268,10 @@ def analyze_correlations(csv_path, phases=("A", "B", "C")):
     for _, row in df.iterrows():
         up_mslink   = row.get("mslink_upstream")
         down_mslink = row.get("mslink_downstream")
-        up   = f"{row.get('device_upstream',   '?')} ({up_mslink})"
-        down = f"{row.get('device_downstream', '?')} ({down_mslink})"
+        up_name   = row.get("device_upstream",   "?")
+        down_name = row.get("device_downstream", "?")
+        up   = f"{up_name} ({up_mslink})"
+        down = f"{down_name} ({down_mslink})"
 
         base = {
             "mslink_upstream":   up_mslink,
@@ -299,9 +301,9 @@ def analyze_correlations(csv_path, phases=("A", "B", "C")):
             individual = [f"{p1}-{p2}" for p1, p2 in missing_cells if (p1, p2) not in explained]
             parts = []
             if miss_up:
-                parts.append(f"phase {'/'.join(miss_up)} missing on upstream")
+                parts.append(f"phase {'/'.join(miss_up)} missing on {up_name}")
             if miss_dn:
-                parts.append(f"phase {'/'.join(miss_dn)} missing on downstream")
+                parts.append(f"phase {'/'.join(miss_dn)} missing on {down_name}")
             if individual:
                 parts.append(f"missing cells: {', '.join(individual)}")
             reason = "; ".join(parts)
@@ -317,7 +319,7 @@ def analyze_correlations(csv_path, phases=("A", "B", "C")):
             best_val = row_vals[best_p2]
             if best_val < 0.5:
                 confusing = True
-                reason = f"upstream phase {p1} has no strong match (best r={best_val:.3f} to downstream {best_p2})"
+                reason = f"{up_name} phase {p1} has no strong match (best r={best_val:.3f} to {down_name} phase {best_p2})"
                 break
             mapping[p1] = best_p2
 
@@ -329,7 +331,7 @@ def analyze_correlations(csv_path, phases=("A", "B", "C")):
                 parts = []
                 for dup_p2 in dups:
                     claimants = [p1 for p1 in phases if mapping.get(p1) == dup_p2]
-                    parts.append(f"upstream {' & '.join(claimants)} both map to downstream {dup_p2}")
+                    parts.append(f"{up_name} phases {' & '.join(claimants)} both map to {down_name} phase {dup_p2}")
                 reason = "; ".join(parts)
 
         mapping_str = "  ".join(f"{p}→{mapping.get(p, '?')}" for p in phases)
