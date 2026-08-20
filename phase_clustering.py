@@ -279,18 +279,34 @@ def analyze_correlations(csv_path, phases=("A", "B", "C")):
             "feeder":            row.get("feeder"),
         }
 
-        # build 3×3 matrix; flag any missing cells
-        mat, missing = {}, False
+        # build 3×3 matrix
+        mat = {}
         for p1 in phases:
             for p2 in phases:
                 val = row.get(f"{p1}-{p2}", float("nan"))
                 mat[(p1, p2)] = float(val) if not pd.isna(val) else float("nan")
-                if pd.isna(mat[(p1, p2)]):
-                    missing = True
 
-        if missing:
-            confusing_rows.append({**base, "reason": "missing phase data"})
-            print(f"[CONFUSING]  {up}  →  {down}  (missing phase data)")
+        missing_cells = [(p1, p2) for p1 in phases for p2 in phases if pd.isna(mat[(p1, p2)])]
+        if missing_cells:
+            # whole rows missing → that upstream phase has no data
+            miss_up = [p1 for p1 in phases
+                       if all(pd.isna(mat[(p1, p2)]) for p2 in phases)]
+            # whole columns missing → that downstream phase has no data
+            miss_dn = [p2 for p2 in phases
+                       if all(pd.isna(mat[(p1, p2)]) for p1 in phases)]
+            explained = {(p1, p2) for p1 in miss_up for p2 in phases} | \
+                        {(p1, p2) for p2 in miss_dn for p1 in phases}
+            individual = [f"{p1}-{p2}" for p1, p2 in missing_cells if (p1, p2) not in explained]
+            parts = []
+            if miss_up:
+                parts.append(f"phase {'/'.join(miss_up)} missing on upstream")
+            if miss_dn:
+                parts.append(f"phase {'/'.join(miss_dn)} missing on downstream")
+            if individual:
+                parts.append(f"missing cells: {', '.join(individual)}")
+            reason = "; ".join(parts)
+            confusing_rows.append({**base, "reason": reason})
+            print(f"[CONFUSING]  {up}  →  {down}  ({reason})")
             continue
 
         # for each upstream phase, find which downstream phase it correlates best with
@@ -301,7 +317,7 @@ def analyze_correlations(csv_path, phases=("A", "B", "C")):
             best_val = row_vals[best_p2]
             if best_val < 0.5:
                 confusing = True
-                reason = f"low max correlation for phase {p1} (r={best_val:.3f})"
+                reason = f"upstream phase {p1} has no strong match (best r={best_val:.3f} to downstream {best_p2})"
                 break
             mapping[p1] = best_p2
 
@@ -310,7 +326,11 @@ def analyze_correlations(csv_path, phases=("A", "B", "C")):
             dups = [p for p in phases if claimed.count(p) > 1]
             if dups:
                 confusing = True
-                reason = f"phases {dups} claimed by multiple upstream phases"
+                parts = []
+                for dup_p2 in dups:
+                    claimants = [p1 for p1 in phases if mapping.get(p1) == dup_p2]
+                    parts.append(f"upstream {' & '.join(claimants)} both map to downstream {dup_p2}")
+                reason = "; ".join(parts)
 
         mapping_str = "  ".join(f"{p}→{mapping.get(p, '?')}" for p in phases)
 
