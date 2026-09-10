@@ -411,6 +411,73 @@ def analyze_correlations(csv_path, phases=("A", "B", "C")):
     }
 
 
+def extract_missing_phase_devices(csv_path, phases=("A", "B", "C")):
+    """
+    Scan the correlation CSV for devices with missing phase data.
+
+    A device is flagged as missing a phase when its entire row (upstream role)
+    or entire column (downstream role) in the 3×3 matrix is NaN for that phase.
+    Individual missing cells that don't form a complete row or column are
+    ambiguous and not attributed to a specific device.
+
+    Returns a DataFrame with columns: mslink, device, feeder, missing_phases.
+    """
+    df = pd.read_csv(csv_path)
+    phases = list(phases)
+
+    device_info = {}  # mslink → {device, feeder, missing_phases}
+
+    for _, row in df.iterrows():
+        up_mslink   = row.get("mslink_upstream")
+        down_mslink = row.get("mslink_downstream")
+        up_name     = row.get("device_upstream",   "?")
+        down_name   = row.get("device_downstream", "?")
+        feeder      = row.get("feeder")
+
+        mat = {}
+        for p1 in phases:
+            for p2 in phases:
+                val = row.get(f"{p1}-{p2}", float("nan"))
+                mat[(p1, p2)] = float(val) if not pd.isna(val) else float("nan")
+
+        for p1 in phases:
+            if all(pd.isna(mat[(p1, p2)]) for p2 in phases):
+                if pd.notna(up_mslink):
+                    entry = device_info.setdefault(up_mslink,
+                                {"device": up_name, "feeder": feeder, "missing": set()})
+                    entry["missing"].add(p1)
+
+        for p2 in phases:
+            if all(pd.isna(mat[(p1, p2)]) for p1 in phases):
+                if pd.notna(down_mslink):
+                    entry = device_info.setdefault(down_mslink,
+                                {"device": down_name, "feeder": feeder, "missing": set()})
+                    entry["missing"].add(p2)
+
+    if not device_info:
+        print("No devices with missing phases found.")
+        return pd.DataFrame(columns=["mslink", "device", "feeder", "missing_phases"])
+
+    records = [
+        {"mslink": mslink,
+         "device": info["device"],
+         "feeder": info["feeder"],
+         "missing_phases": ", ".join(sorted(info["missing"]))}
+        for mslink, info in device_info.items()
+    ]
+    result = (pd.DataFrame(records)
+                .sort_values(["feeder", "device"])
+                .reset_index(drop=True))
+
+    print(f"── Devices with missing phases ({len(result)}) ──────────────────────")
+    for _, r in result.iterrows():
+        print(f"  {r['device']} ({r['mslink']})  feeder={r['feeder']}  "
+              f"missing: {r['missing_phases']}")
+    print(f"────────────────────────────────────────────────────────")
+
+    return result
+
+
 def rank_phase_mismatches(csv_path, phases=("A", "B", "C")):
     """
     Rank unexpected device pairs by mismatch confidence.
