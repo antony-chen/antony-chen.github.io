@@ -402,6 +402,16 @@ def analyze_correlations(csv_path, phases=("A", "B", "C")):
             devices.to_csv(out, index=False)
             print(f"\n  {len(devices)} devices from {len(clean_feeders)} clean feeder(s) "
                   f"({', '.join(str(f) for f in clean_feeders)})  →  {out.name}")
+    # write analysis CSV with all pairs, their category, and mapping/reason
+    from pathlib import Path
+    analysis_path = Path(csv_path).parent / f"{Path(csv_path).stem}__analysis.csv"
+    analysis_rows = (
+        [{**r, "category": "matching",   "reason": ""} for r in matching_rows]
+      + [{**r, "category": "mismatched", "reason": ""} for r in mismatched_rows]
+      + [{**r, "category": "confusing",  "mapping": ""} for r in confusing_rows]
+    )
+    pd.DataFrame(analysis_rows).to_csv(analysis_path, index=False)
+    print(f"  Analysis written  →  {analysis_path.name}")
     print(f"────────────────────────────────────────────────────────")
 
     return {
@@ -411,48 +421,47 @@ def analyze_correlations(csv_path, phases=("A", "B", "C")):
     }
 
 
-def extract_missing_phase_devices(csv_path, phases=("A", "B", "C")):
+def extract_missing_phase_devices(analysis_csv_path):
     """
-    Scan the correlation CSV for devices with missing phase data.
+    Read the analysis CSV produced by analyze_correlations and extract all
+    devices referenced in confusing-pair reason strings as having missing phases.
 
-    A device is flagged as missing a phase when its entire row (upstream role)
-    or entire column (downstream role) in the 3×3 matrix is NaN for that phase.
-    Individual missing cells that don't form a complete row or column are
-    ambiguous and not attributed to a specific device.
+    Parses reason text of the form "phase X/Y missing on DeviceName" and maps
+    the device name back to its mslink using the upstream/downstream columns.
 
     Returns a DataFrame with columns: mslink, device, feeder, missing_phases.
     """
-    df = pd.read_csv(csv_path)
-    phases = list(phases)
+    import re
+    df = pd.read_csv(analysis_csv_path)
+    confusing = df[df["category"] == "confusing"].copy()
 
-    device_info = {}  # mslink → {device, feeder, missing_phases}
-
+    # build device_name → (mslink, feeder) lookup from both roles
+    name_to_meta = {}
     for _, row in df.iterrows():
-        up_mslink   = row.get("mslink_upstream")
-        down_mslink = row.get("mslink_downstream")
-        up_name     = row.get("device_upstream",   "?")
-        down_name   = row.get("device_downstream", "?")
-        feeder      = row.get("feeder")
+        for name_col, mslink_col in [("device_upstream",   "mslink_upstream"),
+                                     ("device_downstream", "mslink_downstream")]:
+            name   = row.get(name_col)
+            mslink = row.get(mslink_col)
+            feeder = row.get("feeder")
+            if pd.notna(name) and pd.notna(mslink):
+                name_to_meta[str(name)] = (mslink, feeder)
 
-        mat = {}
-        for p1 in phases:
-            for p2 in phases:
-                val = row.get(f"{p1}-{p2}", float("nan"))
-                mat[(p1, p2)] = float(val) if not pd.isna(val) else float("nan")
+    pattern = re.compile(r"phase ([\w/]+) missing on ([^;]+)")
 
-        for p1 in phases:
-            if all(pd.isna(mat[(p1, p2)]) for p2 in phases):
-                if pd.notna(up_mslink):
-                    entry = device_info.setdefault(up_mslink,
-                                {"device": up_name, "feeder": feeder, "missing": set()})
-                    entry["missing"].add(p1)
-
-        for p2 in phases:
-            if all(pd.isna(mat[(p1, p2)]) for p1 in phases):
-                if pd.notna(down_mslink):
-                    entry = device_info.setdefault(down_mslink,
-                                {"device": down_name, "feeder": feeder, "missing": set()})
-                    entry["missing"].add(p2)
+    device_info = {}  # mslink → {device, feeder, missing set}
+    for _, row in confusing.iterrows():
+        reason = str(row.get("reason", "") or "")
+        for match in pattern.finditer(reason):
+            phase_str  = match.group(1).strip()
+            device_name = match.group(2).strip()
+            phases_found = phase_str.split("/")
+            meta = name_to_meta.get(device_name)
+            if meta is None:
+                continue
+            mslink, feeder = meta
+            entry = device_info.setdefault(mslink,
+                        {"device": device_name, "feeder": feeder, "missing": set()})
+            entry["missing"].update(phases_found)
 
     if not device_info:
         print("No devices with missing phases found.")
