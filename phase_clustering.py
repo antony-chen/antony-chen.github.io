@@ -68,8 +68,15 @@ def cluster_phases(df,
 def align_intervals(s1, s2, freq="15min"):
     s1 = s1.copy()
     s2 = s2.copy()
-    s1.index = pd.to_datetime(s1.index)
-    s2.index = pd.to_datetime(s2.index)
+
+    def _to_naive(idx):
+        idx = pd.to_datetime(idx)
+        if idx.tz is not None:
+            idx = idx.tz_convert("UTC").tz_localize(None)
+        return idx
+
+    s1.index = _to_naive(s1.index)
+    s2.index = _to_naive(s2.index)
     s1 = s1.resample(freq).mean().dropna()
     s2 = s2.resample(freq).mean().dropna()
     common = s1.index.intersection(s2.index)
