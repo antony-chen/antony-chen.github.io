@@ -131,6 +131,7 @@ def plot_voltage_profiles(devices,
     fig, ax = plt.subplots(figsize=(14, 5))
     all_vals = []
     skipped = []
+    series_map = {}
 
     for df, label in devices:
         df = _filter_time(df, time_col, start_time, end_time)
@@ -152,6 +153,7 @@ def plot_voltage_profiles(devices,
             continue
         ax.plot(s.index, s.values, linewidth=0.8, label=label, alpha=0.8)
         all_vals.extend(s.values)
+        series_map[label] = s
 
     if skipped:
         print(f"Skipped (no data after filtering): {', '.join(skipped)}")
@@ -159,7 +161,7 @@ def plot_voltage_profiles(devices,
     if not all_vals:
         plt.close(fig)
         print("No data to plot.")
-        return
+        return None
 
     all_arr = np.array(all_vals)
     vmin, vmax = np.nanmin(all_arr), np.nanmax(all_arr)
@@ -174,6 +176,15 @@ def plot_voltage_profiles(devices,
     fig.tight_layout()
     ax.set_ylim(vmin - margin, vmax + margin)
     plt.show()
+
+    if len(series_map) < 2:
+        return None
+
+    combined = pd.concat(series_map.values(), axis=1, keys=series_map.keys())
+    corr = combined.corr()
+    print("\nPairwise Pearson correlations:")
+    print(corr.to_string())
+    return corr
 
 
 def plot_phase_voltages(df1, df2, phase1, phase2=None,
