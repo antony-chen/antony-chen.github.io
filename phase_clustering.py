@@ -124,7 +124,7 @@ def plot_voltage_profiles(devices,
 
     devices : list of (df, phase, label) tuples
         df    — DataFrame containing the device's readings
-        phase — phase to extract, e.g. "A"
+        phase — phase or list of phases to plot, e.g. "A" or ["A", "C"]
         label — display name for the legend
 
     Each series is filtered (notna, >0, IQR outlier removal) and
@@ -134,26 +134,29 @@ def plot_voltage_profiles(devices,
     all_vals = []
     skipped = []
 
-    for df, phase, label in devices:
+    for df, phases, label in devices:
+        if isinstance(phases, str):
+            phases = [phases]
         df = _filter_time(df, time_col, start_time, end_time)
-        d = df[(df[phase_col] == phase) & df[voltage_col].notna() & (df[voltage_col] > 0)]
-        if d.empty:
-            skipped.append(f"{label} (Phase {phase})")
-            continue
-        s = _drop_outliers(d.groupby(time_col)[voltage_col].mean().sort_index())
-        if s.empty:
-            skipped.append(f"{label} (Phase {phase})")
-            continue
-        idx = pd.to_datetime(s.index)
-        if idx.tz is not None:
-            idx = idx.tz_convert("UTC").tz_localize(None)
-        s.index = idx
-        s = s.resample("15min").mean().dropna()
-        if s.empty:
-            skipped.append(f"{label} (Phase {phase})")
-            continue
-        ax.plot(s.index, s.values, linewidth=0.8, label=f"{label} — Phase {phase}", alpha=0.8)
-        all_vals.extend(s.values)
+        for phase in phases:
+            d = df[(df[phase_col] == phase) & df[voltage_col].notna() & (df[voltage_col] > 0)]
+            if d.empty:
+                skipped.append(f"{label} (Phase {phase})")
+                continue
+            s = _drop_outliers(d.groupby(time_col)[voltage_col].mean().sort_index())
+            if s.empty:
+                skipped.append(f"{label} (Phase {phase})")
+                continue
+            idx = pd.to_datetime(s.index)
+            if idx.tz is not None:
+                idx = idx.tz_convert("UTC").tz_localize(None)
+            s.index = idx
+            s = s.resample("15min").mean().dropna()
+            if s.empty:
+                skipped.append(f"{label} (Phase {phase})")
+                continue
+            ax.plot(s.index, s.values, linewidth=0.8, label=f"{label} — Phase {phase}", alpha=0.8)
+            all_vals.extend(s.values)
 
     if skipped:
         print(f"Skipped (no data after filtering): {', '.join(skipped)}")
