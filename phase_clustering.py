@@ -116,15 +116,13 @@ def _safe_corr(a, b):
 def plot_voltage_profiles(devices,
                           time_col="timestamp_cst",
                           voltage_col="DATA",
-                          phase_col="PHASE_CHILD",
                           start_time=None,
                           end_time=None):
     """
-    Plot voltage profiles for multiple devices on a single axes.
+    Plot voltage profiles for multiple pre-filtered DataFrames on a single axes.
 
-    devices : list of (df, phase, label) tuples
-        df    — DataFrame containing the device's readings
-        phase — phase or list of phases to plot, e.g. "A" or ["A", "C"]
+    devices : list of (df, label) tuples
+        df    — DataFrame already filtered to the desired phase(s)
         label — display name for the legend
 
     Each series is filtered (notna, >0, IQR outlier removal) and
@@ -134,29 +132,26 @@ def plot_voltage_profiles(devices,
     all_vals = []
     skipped = []
 
-    for df, phases, label in devices:
-        if isinstance(phases, str):
-            phases = [phases]
+    for df, label in devices:
         df = _filter_time(df, time_col, start_time, end_time)
-        for phase in phases:
-            d = df[(df[phase_col] == phase) & df[voltage_col].notna() & (df[voltage_col] > 0)]
-            if d.empty:
-                skipped.append(f"{label} (Phase {phase})")
-                continue
-            s = _drop_outliers(d.groupby(time_col)[voltage_col].mean().sort_index())
-            if s.empty:
-                skipped.append(f"{label} (Phase {phase})")
-                continue
-            idx = pd.to_datetime(s.index)
-            if idx.tz is not None:
-                idx = idx.tz_convert("UTC").tz_localize(None)
-            s.index = idx
-            s = s.resample("15min").mean().dropna()
-            if s.empty:
-                skipped.append(f"{label} (Phase {phase})")
-                continue
-            ax.plot(s.index, s.values, linewidth=0.8, label=f"{label} — Phase {phase}", alpha=0.8)
-            all_vals.extend(s.values)
+        d = df[df[voltage_col].notna() & (df[voltage_col] > 0)]
+        if d.empty:
+            skipped.append(label)
+            continue
+        s = _drop_outliers(d.groupby(time_col)[voltage_col].mean().sort_index())
+        if s.empty:
+            skipped.append(label)
+            continue
+        idx = pd.to_datetime(s.index)
+        if idx.tz is not None:
+            idx = idx.tz_convert("UTC").tz_localize(None)
+        s.index = idx
+        s = s.resample("15min").mean().dropna()
+        if s.empty:
+            skipped.append(label)
+            continue
+        ax.plot(s.index, s.values, linewidth=0.8, label=label, alpha=0.8)
+        all_vals.extend(s.values)
 
     if skipped:
         print(f"Skipped (no data after filtering): {', '.join(skipped)}")
