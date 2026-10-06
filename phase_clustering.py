@@ -65,7 +65,7 @@ def cluster_phases(df,
     return df.merge(result, on=device_col, how="left")
 
 
-def align_intervals(s1, s2, freq="15min"):
+def align_intervals(s1, s2, freq="15min", min_points=2):
     s1 = s1.copy()
     s2 = s2.copy()
 
@@ -80,6 +80,9 @@ def align_intervals(s1, s2, freq="15min"):
     s1 = s1.resample(freq).mean().dropna()
     s2 = s2.resample(freq).mean().dropna()
     common = s1.index.intersection(s2.index)
+    if len(common) < min_points:
+        empty = pd.Series(dtype=float)
+        return empty, empty
     return s1.reindex(common), s2.reindex(common)
 
 
@@ -130,12 +133,18 @@ def plot_phase_voltages(df1, df2, phase1, phase2=None,
     s2 = _drop_outliers(s2)
     s1, s2 = align_intervals(s1, s2)
 
+    phase_label = f"Phase {phase1}" if phase1 == phase2 else f"Phase {phase1} vs {phase2}"
+
+    if len(s1) < 2:
+        print(f"\n[{phase_label}] Insufficient overlapping data to compute correlation.")
+        return float("nan")
+
     corr = _safe_corr(s1, s2)
 
     # rolling correlation to find negatively correlated windows
     window = min(SLOTS_PER_DAY, len(s1))
     neg_periods = []
-    if len(s1) >= window:
+    if len(s1) > window:
         with np.errstate(divide="ignore", invalid="ignore"):
             rolling_corr = s1.rolling(window, center=True).corr(s2)
         neg_mask = rolling_corr < -0.3
@@ -160,7 +169,6 @@ def plot_phase_voltages(df1, df2, phase1, phase2=None,
 
     ax.set_xlabel("Timestamp (CST)")
     ax.set_ylabel("Voltage")
-    phase_label = f"Phase {phase1}" if phase1 == phase2 else f"Phase {phase1} vs {phase2}"
     ax.set_title(f"{phase_label} — Pearson r = {corr:.4f}")
     ax.legend()
 
