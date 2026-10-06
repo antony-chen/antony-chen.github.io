@@ -101,6 +101,15 @@ def _drop_outliers(s, k=3.0):
     return s[(s >= q1 - k * iqr) & (s <= q3 + k * iqr)]
 
 
+def _safe_corr(a, b):
+    """Pearson r, returning NaN instead of warning on constant or short series."""
+    if len(a) < 2 or len(b) < 2:
+        return float("nan")
+    if a.std(ddof=1) == 0 or b.std(ddof=1) == 0:
+        return float("nan")
+    return float(a.corr(b))
+
+
 def plot_phase_voltages(df1, df2, phase1, phase2=None,
                         time_col="timestamp_cst",
                         voltage_col="DATA",
@@ -121,13 +130,14 @@ def plot_phase_voltages(df1, df2, phase1, phase2=None,
     s2 = _drop_outliers(s2)
     s1, s2 = align_intervals(s1, s2)
 
-    corr = s1.corr(s2) if len(s1) > 1 else float("nan")
+    corr = _safe_corr(s1, s2)
 
     # rolling correlation to find negatively correlated windows
     window = min(SLOTS_PER_DAY, len(s1))
     neg_periods = []
     if len(s1) >= window:
-        rolling_corr = s1.rolling(window, center=True).corr(s2)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            rolling_corr = s1.rolling(window, center=True).corr(s2)
         neg_mask = rolling_corr < -0.3
         if neg_mask.any():
             in_run = False
@@ -167,7 +177,7 @@ def plot_phase_voltages(df1, df2, phase1, phase2=None,
     if neg_periods:
         print(f"\n[{phase_label}] {len(neg_periods)} negatively correlated period(s):")
         for i, (start, end) in enumerate(neg_periods, 1):
-            seg_corr = s1.loc[start:end].corr(s2.loc[start:end]) if len(s1.loc[start:end]) > 1 else float("nan")
+            seg_corr = _safe_corr(s1.loc[start:end], s2.loc[start:end])
             print(f"  {i}. {start}  →  {end}   (r = {seg_corr:.3f})")
     else:
         print(f"\n[{phase_label}] No negatively correlated periods found.")
@@ -204,7 +214,7 @@ def phase_correlation_matrix(df1, df2,
         for p2 in phases:
             a, b = align_intervals(s1[p1], s2[p2])
             if len(a) > 1:
-                mat.loc[p1, p2] = a.corr(b)
+                mat.loc[p1, p2] = _safe_corr(a, b)
 
     fig, ax = plt.subplots(figsize=(6, 5))
     im = ax.imshow(mat.values.astype(float), cmap="RdYlGn", vmin=-1, vmax=1)
