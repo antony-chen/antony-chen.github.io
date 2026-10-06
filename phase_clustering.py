@@ -113,6 +113,71 @@ def _safe_corr(a, b):
     return float(a.corr(b))
 
 
+def plot_voltage_profiles(devices,
+                          time_col="timestamp_cst",
+                          voltage_col="DATA",
+                          phase_col="PHASE_CHILD",
+                          start_time=None,
+                          end_time=None):
+    """
+    Plot voltage profiles for multiple devices on a single axes.
+
+    devices : list of (df, phase, label) tuples
+        df    — DataFrame containing the device's readings
+        phase — phase to extract, e.g. "A"
+        label — display name for the legend
+
+    Each series is filtered (notna, >0, IQR outlier removal) and
+    resampled to 15-min intervals before plotting.
+    """
+    fig, ax = plt.subplots(figsize=(14, 5))
+    all_vals = []
+    skipped = []
+
+    for df, phase, label in devices:
+        df = _filter_time(df, time_col, start_time, end_time)
+        d = df[(df[phase_col] == phase) & df[voltage_col].notna() & (df[voltage_col] > 0)]
+        if d.empty:
+            skipped.append(f"{label} (Phase {phase})")
+            continue
+        s = _drop_outliers(d.groupby(time_col)[voltage_col].mean().sort_index())
+        if s.empty:
+            skipped.append(f"{label} (Phase {phase})")
+            continue
+        idx = pd.to_datetime(s.index)
+        if idx.tz is not None:
+            idx = idx.tz_convert("UTC").tz_localize(None)
+        s.index = idx
+        s = s.resample("15min").mean().dropna()
+        if s.empty:
+            skipped.append(f"{label} (Phase {phase})")
+            continue
+        ax.plot(s.index, s.values, linewidth=0.8, label=f"{label} — Phase {phase}", alpha=0.8)
+        all_vals.extend(s.values)
+
+    if skipped:
+        print(f"Skipped (no data after filtering): {', '.join(skipped)}")
+
+    if not all_vals:
+        plt.close(fig)
+        print("No data to plot.")
+        return
+
+    all_arr = np.array(all_vals)
+    vmin, vmax = np.nanmin(all_arr), np.nanmax(all_arr)
+    margin = (vmax - vmin) * 0.02 or 0.1
+
+    ax.set_xlabel("Timestamp (CST)")
+    ax.set_ylabel("Voltage")
+    ax.legend(fontsize=8)
+    ax.set_ylim(vmin - margin, vmax + margin)
+    ax.yaxis.set_major_locator(plt.MaxNLocator(nbins=10))
+    fig.autofmt_xdate()
+    fig.tight_layout()
+    ax.set_ylim(vmin - margin, vmax + margin)
+    plt.show()
+
+
 def plot_phase_voltages(df1, df2, phase1, phase2=None,
                         time_col="timestamp_cst",
                         voltage_col="DATA",
