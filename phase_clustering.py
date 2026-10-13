@@ -113,6 +113,63 @@ def _safe_corr(a, b):
     return float(a.corr(b))
 
 
+def voltage_correlation_matrix(devices,
+                               time_col="timestamp_cst",
+                               voltage_col="DATA",
+                               start_time=None,
+                               end_time=None):
+    """
+    Compute a pairwise Pearson correlation matrix across device voltage profiles.
+
+    devices : list of (df, label) tuples
+        df    — DataFrame already filtered to the desired phase
+        label — name for the row/column in the output matrix
+
+    Returns a square DataFrame of correlation coefficients, or None if
+    fewer than 2 series could be built.
+    """
+    series_map = {}
+
+    for df, label in devices:
+        df = _filter_time(df, time_col, start_time, end_time)
+        d = df[df[voltage_col].notna() & (df[voltage_col] > 0)]
+        if d.empty:
+            continue
+        s = _drop_outliers(d.groupby(time_col)[voltage_col].mean().sort_index())
+        if s.empty:
+            continue
+        idx = pd.to_datetime(s.index)
+        if idx.tz is not None:
+            idx = idx.tz_convert("UTC").tz_localize(None)
+        s.index = idx
+        s = s.resample("15min").mean().dropna()
+        if s.empty:
+            continue
+        series_map[label] = s
+
+    if len(series_map) < 2:
+        print("Need at least 2 non-empty series to compute correlations.")
+        return None
+
+    combined = pd.concat(series_map.values(), axis=1, keys=series_map.keys())
+    labels = list(series_map.keys())
+    n = len(labels)
+    matrix = pd.DataFrame(index=labels, columns=labels, dtype=float)
+    for i in range(n):
+        for j in range(n):
+            if i == j:
+                matrix.iloc[i, j] = 1.0
+            elif j < i:
+                matrix.iloc[i, j] = matrix.iloc[j, i]
+            else:
+                a = combined[labels[i]].dropna()
+                b = combined[labels[j]].dropna()
+                common = a.index.intersection(b.index)
+                matrix.iloc[i, j] = _safe_corr(a.reindex(common), b.reindex(common))
+
+    return matrix
+
+
 def plot_voltage_profiles(devices,
                           time_col="timestamp_cst",
                           voltage_col="DATA",
