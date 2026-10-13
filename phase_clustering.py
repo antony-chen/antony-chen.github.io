@@ -173,6 +173,23 @@ def voltage_correlation_matrix(devices,
                 common = a.index.intersection(b.index)
                 matrix.iloc[i, j] = _corr(a.reindex(common), b.reindex(common))
 
+    fig, ax = plt.subplots(figsize=(max(4, n), max(3, n - 1)))
+    vals = matrix.values.astype(float)
+    im = ax.imshow(vals, vmin=-1, vmax=1, cmap="RdYlGn", aspect="auto")
+    plt.colorbar(im, ax=ax, label="Pearson r")
+    ax.set_xticks(range(n))
+    ax.set_yticks(range(n))
+    ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=8)
+    ax.set_yticklabels(labels, fontsize=8)
+    for i in range(n):
+        for j in range(n):
+            v = vals[i, j]
+            ax.text(j, i, f"{v:.2f}", ha="center", va="center",
+                    fontsize=7, color="black" if abs(v) < 0.7 else "white")
+    ax.set_title("Voltage Profile Correlations")
+    fig.tight_layout()
+    plt.show()
+
     return matrix
 
 
