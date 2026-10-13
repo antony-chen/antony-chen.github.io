@@ -106,7 +106,17 @@ def _drop_outliers(s, k=3.0):
 
 def _corr(a, b):
     with np.errstate(divide="ignore", invalid="ignore"):
-        return float(a.corr(b))
+        result = float(a.corr(b))
+    if np.isnan(result):
+        if len(a) < 2 or len(b) < 2:
+            return float("nan")
+        # constant series — same value means identical, different means no relationship
+        a_const = a.std(ddof=1) == 0
+        b_const = b.std(ddof=1) == 0
+        if a_const and b_const:
+            return 1.0 if float(a.iloc[0]) == float(b.iloc[0]) else 0.0
+        return 0.0
+    return result
 
 
 def voltage_correlation_matrix(devices,
