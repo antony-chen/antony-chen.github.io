@@ -104,6 +104,10 @@ def _drop_outliers(s, k=3.0):
     return s[(s >= q1 - k * iqr) & (s <= q3 + k * iqr)]
 
 
+def _corr(a, b):
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return float(a.corr(b))
+
 
 def voltage_correlation_matrix(devices,
                                time_col="timestamp_cst",
@@ -157,8 +161,7 @@ def voltage_correlation_matrix(devices,
                 a = combined[labels[i]].dropna()
                 b = combined[labels[j]].dropna()
                 common = a.index.intersection(b.index)
-                with np.errstate(divide="ignore", invalid="ignore"):
-                    matrix.iloc[i, j] = float(a.reindex(common).corr(b.reindex(common)))
+                matrix.iloc[i, j] = _corr(a.reindex(common), b.reindex(common))
 
     return matrix
 
@@ -263,8 +266,7 @@ def plot_phase_voltages(df1, df2, phase1, phase2=None,
         print(f"\n[{phase_label}] Insufficient overlapping data to compute correlation.")
         return float("nan")
 
-    with np.errstate(divide="ignore", invalid="ignore"):
-        corr = float(s1.corr(s2))
+    corr = _corr(s1, s2)
 
     # rolling correlation to find negatively correlated windows
     window = min(SLOTS_PER_DAY, len(s1))
@@ -310,8 +312,7 @@ def plot_phase_voltages(df1, df2, phase1, phase2=None,
     if neg_periods:
         print(f"\n[{phase_label}] {len(neg_periods)} negatively correlated period(s):")
         for i, (start, end) in enumerate(neg_periods, 1):
-            with np.errstate(divide="ignore", invalid="ignore"):
-                seg_corr = float(s1.loc[start:end].corr(s2.loc[start:end]))
+            seg_corr = _corr(s1.loc[start:end], s2.loc[start:end])
             print(f"  {i}. {start}  →  {end}   (r = {seg_corr:.3f})")
     else:
         print(f"\n[{phase_label}] No negatively correlated periods found.")
@@ -348,8 +349,7 @@ def phase_correlation_matrix(df1, df2,
         for p2 in phases:
             a, b = align_intervals(s1[p1], s2[p2])
             if len(a) > 1:
-                with np.errstate(divide="ignore", invalid="ignore"):
-                    mat.loc[p1, p2] = float(a.corr(b))
+                mat.loc[p1, p2] = _corr(a, b)
 
     fig, ax = plt.subplots(figsize=(6, 5))
     im = ax.imshow(mat.values.astype(float), cmap="RdYlGn", vmin=-1, vmax=1)
