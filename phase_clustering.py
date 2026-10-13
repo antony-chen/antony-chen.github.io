@@ -157,7 +157,8 @@ def voltage_correlation_matrix(devices,
                 a = combined[labels[i]].dropna()
                 b = combined[labels[j]].dropna()
                 common = a.index.intersection(b.index)
-                matrix.iloc[i, j] = float(a.reindex(common).corr(b.reindex(common)))
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    matrix.iloc[i, j] = float(a.reindex(common).corr(b.reindex(common)))
 
     return matrix
 
@@ -262,7 +263,8 @@ def plot_phase_voltages(df1, df2, phase1, phase2=None,
         print(f"\n[{phase_label}] Insufficient overlapping data to compute correlation.")
         return float("nan")
 
-    corr = float(s1.corr(s2))
+    with np.errstate(divide="ignore", invalid="ignore"):
+        corr = float(s1.corr(s2))
 
     # rolling correlation to find negatively correlated windows
     window = min(SLOTS_PER_DAY, len(s1))
@@ -308,7 +310,8 @@ def plot_phase_voltages(df1, df2, phase1, phase2=None,
     if neg_periods:
         print(f"\n[{phase_label}] {len(neg_periods)} negatively correlated period(s):")
         for i, (start, end) in enumerate(neg_periods, 1):
-            seg_corr = float(s1.loc[start:end].corr(s2.loc[start:end]))
+            with np.errstate(divide="ignore", invalid="ignore"):
+                seg_corr = float(s1.loc[start:end].corr(s2.loc[start:end]))
             print(f"  {i}. {start}  →  {end}   (r = {seg_corr:.3f})")
     else:
         print(f"\n[{phase_label}] No negatively correlated periods found.")
@@ -345,7 +348,8 @@ def phase_correlation_matrix(df1, df2,
         for p2 in phases:
             a, b = align_intervals(s1[p1], s2[p2])
             if len(a) > 1:
-                mat.loc[p1, p2] = float(a.corr(b))
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    mat.loc[p1, p2] = float(a.corr(b))
 
     fig, ax = plt.subplots(figsize=(6, 5))
     im = ax.imshow(mat.values.astype(float), cmap="RdYlGn", vmin=-1, vmax=1)
