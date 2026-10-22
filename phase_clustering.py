@@ -666,6 +666,93 @@ def extract_missing_phase_devices(analysis_csv_path):
     return result
 
 
+def find_low_correlation_phases(csv_path, threshold=0.6, phases=("A", "B", "C")):
+    """
+    Read a phase correlation matrix CSV (produced by phase_correlation_matrix)
+    and identify every device-phase that has low correlation (< threshold)
+    across its entire row or column in at least one pair.
+
+    A device-phase is flagged when ALL of its correlation values with the
+    other device's phases are below the threshold:
+      - row flag  : upstream_device / phase_X has max(X-A, X-B, X-C) < threshold
+      - column flag: downstream_device / phase_Y has max(A-Y, B-Y, C-Y) < threshold
+
+    Returns a DataFrame with columns:
+        mslink, device, role (upstream/downstream), phase, max_corr, feeder
+    sorted by max_corr ascending.
+    """
+    df = pd.read_csv(csv_path)
+    phase_cols = [f"{p1}-{p2}" for p1 in phases for p2 in phases]
+    present = [c for c in phase_cols if c in df.columns]
+
+    records = []
+
+    for _, row in df.iterrows():
+        up_mslink  = row.get("mslink_upstream")
+        up_device  = row.get("device_upstream")
+        dn_mslink  = row.get("mslink_downstream")
+        dn_device  = row.get("device_downstream")
+        feeder     = row.get("feeder")
+
+        # reconstruct the sub-matrix for this pair
+        mat = {}
+        for col in present:
+            p1, p2 = col.split("-")
+            mat.setdefault(p1, {})[p2] = row[col]
+
+        # check each upstream phase (row of the pair matrix)
+        for p in phases:
+            row_vals = [mat.get(p, {}).get(q, np.nan) for q in phases]
+            finite = [v for v in row_vals if not np.isnan(v)]
+            if not finite:
+                continue
+            max_corr = max(finite)
+            if max_corr < threshold:
+                records.append({
+                    "mslink":    up_mslink,
+                    "device":    up_device,
+                    "role":      "upstream",
+                    "phase":     p,
+                    "max_corr":  round(max_corr, 4),
+                    "feeder":    feeder,
+                })
+
+        # check each downstream phase (column of the pair matrix)
+        for q in phases:
+            col_vals = [mat.get(p, {}).get(q, np.nan) for p in phases]
+            finite = [v for v in col_vals if not np.isnan(v)]
+            if not finite:
+                continue
+            max_corr = max(finite)
+            if max_corr < threshold:
+                records.append({
+                    "mslink":    dn_mslink,
+                    "device":    dn_device,
+                    "role":      "downstream",
+                    "phase":     q,
+                    "max_corr":  round(max_corr, 4),
+                    "feeder":    feeder,
+                })
+
+    if not records:
+        print(f"No device-phases found with max correlation < {threshold}.")
+        return pd.DataFrame(columns=["mslink", "device", "role", "phase", "max_corr", "feeder"])
+
+    result = (pd.DataFrame(records)
+                .drop_duplicates()
+                .sort_values("max_corr")
+                .reset_index(drop=True))
+
+    print(f"── Low-correlation device-phases (threshold={threshold}) "
+          f"── {len(result)} found ──")
+    for _, r in result.iterrows():
+        print(f"  {r['device']} ({r['mslink']})  phase={r['phase']}  "
+              f"role={r['role']}  max_corr={r['max_corr']}  feeder={r['feeder']}")
+    print("────────────────────────────────────────────────────────")
+
+    return result
+
+
 def rank_phase_mismatches(csv_path, phases=("A", "B", "C")):
     """
     Rank unexpected device pairs by mismatch confidence.
