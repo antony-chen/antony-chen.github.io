@@ -815,7 +815,8 @@ def _plot_load_temp_single(df, poi, load_col, temp_col, time_col, color_by):
     fig.tight_layout()
     plt.show()
 
-    print(f"  [{poi}] Pearson r={r:.4f}   n={len(df):,}")
+    print(f"  [{poi}] Pearson r={r:.4f}   slope={coef[0]:.4g}   n={len(df):,}")
+    return round(r, 6), round(float(coef[0]), 6)
 
 
 def plot_load_vs_temperature(load_df, temp_df,
@@ -861,9 +862,17 @@ def plot_load_vs_temperature(load_df, temp_df,
     feeders = sorted(merged[feeder_col].dropna().unique())
     print(f"{len(feeders)} feeder(s) found: {feeders}")
 
+    merged["pearson_r"] = float("nan")
+    merged["slope"] = float("nan")
+
     for feeder in feeders:
-        _plot_load_temp_single(merged[merged[feeder_col] == feeder], feeder,
-                               load_col, temp_col, time_col, color_by)
+        mask = merged[feeder_col] == feeder
+        result = _plot_load_temp_single(merged[mask], feeder,
+                                        load_col, temp_col, time_col, color_by)
+        if result is not None:
+            r, slope = result
+            merged.loc[mask, "pearson_r"] = r
+            merged.loc[mask, "slope"] = slope
 
     return merged
 
