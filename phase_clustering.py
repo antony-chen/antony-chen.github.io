@@ -756,6 +756,8 @@ def find_low_correlation_phases(csv_path, threshold=0.6, phases=("A", "B", "C"))
 def _plot_load_temp_single(df, poi, load_col, temp_col, time_col, color_by):
     """Render the two-panel scatter + time-series plot for one feeder."""
     df = df[df[load_col].notna() & df[temp_col].notna()].copy()
+    df[load_col] = df[load_col].astype(float)
+    df[temp_col] = df[temp_col].astype(float)
     if df.empty:
         print(f"  [{poi}] no data after filtering — skipped")
         return
