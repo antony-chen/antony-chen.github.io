@@ -753,6 +753,121 @@ def find_low_correlation_phases(csv_path, threshold=0.6, phases=("A", "B", "C"))
     return result
 
 
+def plot_load_vs_temperature(load_df, temp_df,
+                             load_col="load_kw",
+                             temp_col="temperature_f",
+                             time_col="timestamp",
+                             poi_col="poi_id",
+                             color_by="hour"):
+    """
+    Join hourly load and temperature DataFrames on (time_col, poi_col) and
+    plot the temperature-load relationship.
+
+    color_by : "hour"   — colour points by hour of day (0–23)
+               "month"  — colour points by month (1–12)
+               "poi_id" — colour points by poi_id
+               None     — no colouring
+    """
+    load_df = load_df.copy()
+    temp_df = temp_df.copy()
+
+    load_df[time_col] = pd.to_datetime(load_df[time_col])
+    temp_df[time_col] = pd.to_datetime(temp_df[time_col])
+
+    # strip tz so merge keys are compatible
+    for _df in (load_df, temp_df):
+        if _df[time_col].dt.tz is not None:
+            _df[time_col] = _df[time_col].dt.tz_convert("UTC").dt.tz_localize(None)
+
+    merged = pd.merge(load_df, temp_df, on=[time_col, poi_col], how="inner",
+                      suffixes=("_load", "_temp"))
+
+    if merged.empty:
+        print("No overlapping records after join — check column names and poi_id values.")
+        return None
+
+    merged = merged[merged[load_col].notna() & merged[temp_col].notna()]
+
+    # ── colour mapping ───────────────────────────────────────────────────────
+    if color_by == "hour":
+        c_vals  = merged[time_col].dt.hour
+        cmap    = "twilight"
+        cb_label = "Hour of day"
+        vmin, vmax = 0, 23
+    elif color_by == "month":
+        c_vals  = merged[time_col].dt.month
+        cmap    = "tab12" if hasattr(plt.cm, "tab12") else "hsv"
+        cb_label = "Month"
+        vmin, vmax = 1, 12
+    elif color_by == poi_col or color_by == "poi_id":
+        codes   = pd.Categorical(merged[poi_col]).codes
+        c_vals  = codes
+        cmap    = "tab10"
+        cb_label = poi_col
+        vmin, vmax = codes.min(), codes.max()
+    else:
+        c_vals  = None
+        cmap    = None
+        cb_label = None
+        vmin = vmax = None
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+    # ── left: scatter temperature vs load ────────────────────────────────────
+    ax = axes[0]
+    sc_kw = dict(s=8, alpha=0.4, linewidths=0)
+    if c_vals is not None:
+        sc = ax.scatter(merged[temp_col], merged[load_col], c=c_vals,
+                        cmap=cmap, vmin=vmin, vmax=vmax, **sc_kw)
+        fig.colorbar(sc, ax=ax, label=cb_label)
+    else:
+        ax.scatter(merged[temp_col], merged[load_col], **sc_kw)
+
+    # regression line
+    x = merged[temp_col].values
+    y = merged[load_col].values
+    coef = np.polyfit(x, y, 1)
+    xline = np.linspace(x.min(), x.max(), 200)
+    ax.plot(xline, np.polyval(coef, xline), color="crimson", linewidth=1.5,
+            label=f"slope={coef[0]:.3g}")
+    ax.set_xlabel(temp_col)
+    ax.set_ylabel(load_col)
+    ax.set_title("Load vs Temperature")
+    ax.legend(fontsize=8)
+
+    # ── right: dual-axis time series ─────────────────────────────────────────
+    ax2 = axes[1]
+    ts = merged.set_index(time_col)[[load_col, temp_col]].sort_index()
+
+    # aggregate to hourly mean in case multiple poi_ids overlap
+    ts = ts.resample("1h").mean()
+
+    color_load = "steelblue"
+    color_temp = "darkorange"
+    ax2.plot(ts.index, ts[load_col], color=color_load, linewidth=0.7,
+             label=load_col, alpha=0.85)
+    ax2.set_ylabel(load_col, color=color_load)
+    ax2.tick_params(axis="y", labelcolor=color_load)
+
+    ax_r = ax2.twinx()
+    ax_r.plot(ts.index, ts[temp_col], color=color_temp, linewidth=0.7,
+              label=temp_col, alpha=0.85)
+    ax_r.set_ylabel(temp_col, color=color_temp)
+    ax_r.tick_params(axis="y", labelcolor=color_temp)
+
+    lines = ax2.get_lines() + ax_r.get_lines()
+    ax2.legend(lines, [l.get_label() for l in lines], fontsize=8, loc="upper left")
+    ax2.set_title("Load & Temperature over Time")
+    fig.autofmt_xdate()
+
+    fig.tight_layout()
+    plt.show()
+
+    r = float(np.corrcoef(x, y)[0, 1])
+    print(f"Pearson r (temp vs load): {r:.4f}   n={len(merged):,}")
+    return merged
+
+
 def rank_phase_mismatches(csv_path, phases=("A", "B", "C")):
     """
     Rank unexpected device pairs by mismatch confidence.
