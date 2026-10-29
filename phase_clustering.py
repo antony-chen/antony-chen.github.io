@@ -821,10 +821,14 @@ def plot_load_vs_temperature(load_df, temp_df,
                              temp_col="temperature_f",
                              time_col="timestamp",
                              poi_col="poi_id",
+                             feeder_col="feeder",
                              color_by="hour"):
     """
     Join hourly load and temperature DataFrames on (time_col, poi_col) and
-    produce one two-panel plot per feeder (poi_id).
+    produce one two-panel plot per feeder (feeder_col).
+
+    poi_col identifies the geographic area used as the join key; feeder_col
+    is the column in load_df that groups records into feeders.
 
     Left panel  — scatter of temperature vs load with OLS regression line.
     Right panel — dual-axis time series of load and temperature.
@@ -852,11 +856,11 @@ def plot_load_vs_temperature(load_df, temp_df,
         print("No overlapping records after join — check column names and poi_id values.")
         return None
 
-    feeders = sorted(merged[poi_col].dropna().unique())
+    feeders = sorted(merged[feeder_col].dropna().unique())
     print(f"{len(feeders)} feeder(s) found: {feeders}")
 
-    for poi in feeders:
-        _plot_load_temp_single(merged[merged[poi_col] == poi], poi,
+    for feeder in feeders:
+        _plot_load_temp_single(merged[merged[feeder_col] == feeder], feeder,
                                load_col, temp_col, time_col, color_by)
 
     return merged
