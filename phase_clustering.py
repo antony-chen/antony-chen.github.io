@@ -753,7 +753,7 @@ def find_low_correlation_phases(csv_path, threshold=0.6, phases=("A", "B", "C"))
     return result
 
 
-def _plot_load_temp_single(df, poi, load_col, temp_col, time_col, color_by):
+def _plot_load_temp_single(df, poi, load_col, temp_col, time_col, color_by, plot=True):
     """Render the two-panel scatter + time-series plot for one feeder."""
     df = df[df[load_col].notna() & df[temp_col].notna()].copy()
     df[load_col] = df[load_col].astype(float)
@@ -761,6 +761,15 @@ def _plot_load_temp_single(df, poi, load_col, temp_col, time_col, color_by):
     if df.empty:
         print(f"  [{poi}] no data after filtering — skipped")
         return
+
+    x, y = df[temp_col].values, df[load_col].values
+    coef = np.polyfit(x, y, 1)
+    r = float(np.corrcoef(x, y)[0, 1])
+
+    print(f"  [{poi}] Pearson r={r:.4f}   slope={coef[0]:.4g}   n={len(df):,}")
+
+    if not plot:
+        return round(r, 6), round(float(coef[0]), 6)
 
     if color_by == "hour":
         c_vals, cmap, cb_label = df[time_col].dt.hour, "twilight", "Hour of day"
@@ -784,10 +793,7 @@ def _plot_load_temp_single(df, poi, load_col, temp_col, time_col, color_by):
     else:
         ax.scatter(df[temp_col], df[load_col], **sc_kw)
 
-    x, y = df[temp_col].values, df[load_col].values
-    coef = np.polyfit(x, y, 1)
     xline = np.linspace(x.min(), x.max(), 200)
-    r = float(np.corrcoef(x, y)[0, 1])
     ax.plot(xline, np.polyval(coef, xline), color="crimson", linewidth=1.5,
             label=f"slope={coef[0]:.3g}  r={r:.3f}")
     ax.set_xlabel(temp_col)
@@ -825,7 +831,8 @@ def plot_load_vs_temperature(load_df, temp_df,
                              time_col="timestamp",
                              poi_col="poi_id",
                              feeder_col="feeder",
-                             color_by="hour"):
+                             color_by="hour",
+                             plot=True):
     """
     Join hourly load and temperature DataFrames on (time_col, poi_col) and
     produce one two-panel plot per feeder (feeder_col).
@@ -868,7 +875,8 @@ def plot_load_vs_temperature(load_df, temp_df,
     for feeder in feeders:
         mask = merged[feeder_col] == feeder
         result = _plot_load_temp_single(merged[mask], feeder,
-                                        load_col, temp_col, time_col, color_by)
+                                        load_col, temp_col, time_col, color_by,
+                                        plot=plot)
         if result is not None:
             r, slope = result
             merged.loc[mask, "pearson_r"] = r
