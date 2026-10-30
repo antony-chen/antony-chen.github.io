@@ -766,10 +766,23 @@ def _plot_load_temp_single(df, poi, load_col, temp_col, time_col, color_by, plot
     coef = np.polyfit(x, y, 1)
     r = float(np.corrcoef(x, y)[0, 1])
 
-    print(f"  [{poi}] Pearson r={r:.4f}   slope={coef[0]:.4g}   n={len(df):,}")
+    # per-week stats
+    df["_week"] = df[time_col].dt.to_period("W")
+    weekly_stats = {}
+    for week, wdf in df.groupby("_week"):
+        wx, wy = wdf[temp_col].values, wdf[load_col].values
+        if len(wx) < 2:
+            continue
+        wcoef = np.polyfit(wx, wy, 1)
+        wr = float(np.corrcoef(wx, wy)[0, 1])
+        weekly_stats[str(week)] = (round(wr, 6), round(float(wcoef[0]), 6))
+
+    print(f"  [{poi}] overall  Pearson r={r:.4f}   slope={coef[0]:.4g}   n={len(df):,}")
+    for wk, (wr, ws) in weekly_stats.items():
+        print(f"    week {wk}  r={wr:.4f}   slope={ws:.4g}")
 
     if not plot:
-        return round(r, 6), round(float(coef[0]), 6)
+        return round(r, 6), round(float(coef[0]), 6), weekly_stats
 
     if color_by == "hour":
         c_vals, cmap, cb_label = df[time_col].dt.hour, "twilight", "Hour of day"
@@ -794,12 +807,27 @@ def _plot_load_temp_single(df, poi, load_col, temp_col, time_col, color_by, plot
         ax.scatter(df[temp_col], df[load_col], **sc_kw)
 
     xline = np.linspace(x.min(), x.max(), 200)
-    ax.plot(xline, np.polyval(coef, xline), color="crimson", linewidth=1.5,
-            label=f"slope={coef[0]:.3g}  r={r:.3f}")
+
+    # per-week lines (faded)
+    week_cmap = plt.get_cmap("tab20")
+    for idx, (week, wdf) in enumerate(df.groupby("_week")):
+        wx, wy = wdf[temp_col].values, wdf[load_col].values
+        if len(wx) < 2:
+            continue
+        wcoef = np.polyfit(wx, wy, 1)
+        wr = float(np.corrcoef(wx, wy)[0, 1])
+        color = week_cmap(idx % 20)
+        ax.plot(xline, np.polyval(wcoef, xline), color=color, linewidth=0.8,
+                alpha=0.55, label=f"{week}  r={wr:.2f}")
+
+    # overall line on top
+    ax.plot(xline, np.polyval(coef, xline), color="crimson", linewidth=2.0,
+            label=f"overall  slope={coef[0]:.3g}  r={r:.3f}", zorder=10)
+
     ax.set_xlabel(temp_col)
     ax.set_ylabel(load_col)
     ax.set_title("Load vs Temperature")
-    ax.legend(fontsize=8)
+    ax.legend(fontsize=6, loc="upper left")
 
     # dual-axis time series
     ax2 = axes[1]
@@ -821,8 +849,7 @@ def _plot_load_temp_single(df, poi, load_col, temp_col, time_col, color_by, plot
     fig.tight_layout()
     plt.show()
 
-    print(f"  [{poi}] Pearson r={r:.4f}   slope={coef[0]:.4g}   n={len(df):,}")
-    return round(r, 6), round(float(coef[0]), 6)
+    return round(r, 6), round(float(coef[0]), 6), weekly_stats
 
 
 def plot_load_vs_temperature(load_df, temp_df,
@@ -871,17 +898,26 @@ def plot_load_vs_temperature(load_df, temp_df,
 
     merged["pearson_r"] = float("nan")
     merged["slope"] = float("nan")
+    merged["weekly_pearson_r"] = float("nan")
+    merged["weekly_slope"] = float("nan")
+    merged["_week"] = pd.to_datetime(merged[time_col]).dt.to_period("W").astype(str)
 
     for feeder in feeders:
         mask = merged[feeder_col] == feeder
         result = _plot_load_temp_single(merged[mask], feeder,
                                         load_col, temp_col, time_col, color_by,
                                         plot=plot)
-        if result is not None:
-            r, slope = result
-            merged.loc[mask, "pearson_r"] = r
-            merged.loc[mask, "slope"] = slope
+        if result is None:
+            continue
+        r, slope, weekly_stats = result
+        merged.loc[mask, "pearson_r"] = r
+        merged.loc[mask, "slope"] = slope
+        for week_str, (wr, ws) in weekly_stats.items():
+            week_mask = mask & (merged["_week"] == week_str)
+            merged.loc[week_mask, "weekly_pearson_r"] = wr
+            merged.loc[week_mask, "weekly_slope"] = ws
 
+    merged.drop(columns=["_week"], inplace=True)
     return merged
 
 
