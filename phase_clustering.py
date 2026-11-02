@@ -921,6 +921,135 @@ def plot_load_vs_temperature(load_df, temp_df,
     return merged
 
 
+def forecast_load_from_temperature(load_df, temp_df,
+                                   load_col="load_kw",
+                                   temp_col="temperature_f",
+                                   time_col="timestamp",
+                                   poi_col="poi_id",
+                                   feeder_col="feeder",
+                                   plot=True):
+    """
+    Train a linear regression (temperature → load) on week 1 of each feeder,
+    forecast week 2 load from week 2 temperatures, and compare against actuals.
+
+    The two calendar weeks are identified automatically from the data; the
+    earlier week is used for training and the later for evaluation.
+
+    Returns a dict keyed by feeder with:
+        slope, intercept, train_r          — week-1 model
+        mae, rmse, forecast_r              — week-2 forecast quality
+        week2                              — DataFrame of week-2 rows with
+                                             a "load_forecast" column added
+    """
+    load_df = load_df.copy()
+    temp_df = temp_df.copy()
+
+    load_df[time_col] = pd.to_datetime(load_df[time_col])
+    temp_df[time_col] = pd.to_datetime(temp_df[time_col])
+
+    for _df in (load_df, temp_df):
+        if _df[time_col].dt.tz is not None:
+            _df[time_col] = _df[time_col].dt.tz_convert("UTC").dt.tz_localize(None)
+
+    merged = pd.merge(load_df, temp_df, on=[time_col, poi_col], how="inner",
+                      suffixes=("_load", "_temp"))
+
+    if merged.empty:
+        print("No overlapping records after join.")
+        return {}
+
+    merged[load_col] = merged[load_col].astype(float)
+    merged[temp_col] = merged[temp_col].astype(float)
+    merged = merged[merged[load_col].notna() & merged[temp_col].notna()]
+
+    merged["_week"] = merged[time_col].dt.to_period("W")
+
+    results = {}
+    feeders = sorted(merged[feeder_col].dropna().unique())
+    print(f"{len(feeders)} feeder(s): {feeders}")
+
+    for feeder in feeders:
+        fdf = merged[merged[feeder_col] == feeder].copy()
+        weeks = sorted(fdf["_week"].unique())
+        if len(weeks) < 2:
+            print(f"  [{feeder}] fewer than 2 weeks of data — skipped")
+            continue
+
+        w1, w2 = weeks[0], weeks[1]
+        train = fdf[fdf["_week"] == w1].copy()
+        test  = fdf[fdf["_week"] == w2].copy()
+
+        if len(train) < 2 or test.empty:
+            print(f"  [{feeder}] insufficient data in one of the weeks — skipped")
+            continue
+
+        # fit on week 1
+        x_train = train[temp_col].values
+        y_train = train[load_col].values
+        coef = np.polyfit(x_train, y_train, 1)
+        slope, intercept = float(coef[0]), float(coef[1])
+        train_r = float(np.corrcoef(x_train, y_train)[0, 1])
+
+        # forecast week 2
+        x_test = test[temp_col].values
+        y_actual = test[load_col].values
+        y_forecast = np.polyval(coef, x_test)
+        test = test.copy()
+        test["load_forecast"] = y_forecast
+
+        residuals = y_actual - y_forecast
+        mae  = float(np.mean(np.abs(residuals)))
+        rmse = float(np.sqrt(np.mean(residuals ** 2)))
+        with np.errstate(divide="ignore", invalid="ignore"):
+            forecast_r = float(np.corrcoef(y_actual, y_forecast)[0, 1])
+
+        print(f"  [{feeder}]  week 1 ({w1})  r={train_r:.4f}  "
+              f"slope={slope:.4g}  intercept={intercept:.4g}")
+        print(f"           week 2 ({w2})  MAE={mae:.4g}  RMSE={rmse:.4g}  "
+              f"forecast_r={forecast_r:.4f}")
+
+        results[feeder] = {
+            "slope": slope, "intercept": intercept, "train_r": train_r,
+            "mae": mae, "rmse": rmse, "forecast_r": forecast_r,
+            "week2": test,
+        }
+
+        if not plot:
+            continue
+
+        fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+        fig.suptitle(f"Feeder: {feeder}", fontsize=11)
+
+        # left — week 1 scatter + fit line
+        ax = axes[0]
+        ax.scatter(x_train, y_train, s=8, alpha=0.45, linewidths=0,
+                   label=f"week 1 data  (r={train_r:.3f})")
+        xline = np.linspace(x_train.min(), x_train.max(), 200)
+        ax.plot(xline, np.polyval(coef, xline), color="crimson", linewidth=1.5,
+                label=f"fit: slope={slope:.3g}")
+        ax.set_xlabel(temp_col)
+        ax.set_ylabel(load_col)
+        ax.set_title(f"Week 1 fit  ({w1})")
+        ax.legend(fontsize=8)
+
+        # right — week 2 actual vs forecast time series
+        ax2 = axes[1]
+        test_sorted = test.set_index(time_col).sort_index()
+        ax2.plot(test_sorted.index, test_sorted[load_col], color="steelblue",
+                 linewidth=0.9, label="actual", alpha=0.9)
+        ax2.plot(test_sorted.index, test_sorted["load_forecast"], color="crimson",
+                 linewidth=0.9, linestyle="--", label="forecast", alpha=0.9)
+        ax2.set_ylabel(load_col)
+        ax2.set_title(f"Week 2 forecast vs actual  ({w2})\n"
+                      f"MAE={mae:.4g}  RMSE={rmse:.4g}  r={forecast_r:.3f}")
+        ax2.legend(fontsize=8)
+        fig.autofmt_xdate()
+        fig.tight_layout()
+        plt.show()
+
+    return results
+
+
 def rank_phase_mismatches(csv_path, phases=("A", "B", "C")):
     """
     Rank unexpected device pairs by mismatch confidence.
