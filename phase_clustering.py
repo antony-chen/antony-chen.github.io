@@ -1095,6 +1095,97 @@ def forecast_load_from_temperature(load_df, temp_df,
     return results
 
 
+def compare_daily_peaks(load_df, temp_df,
+                        load_col="load_kw",
+                        temp_col="temperature_f",
+                        time_col="timestamp",
+                        poi_col="poi_id",
+                        feeder_col="feeder"):
+    """
+    For each feeder and each calendar day, find the hour of peak load and
+    the hour of peak temperature, then compute the offset between them.
+
+    offset_hours = peak_load_hour - peak_temp_hour
+      positive → load peaks AFTER temperature (load lags temperature)
+      negative → load peaks BEFORE temperature (load leads temperature)
+
+    Returns a tuple (detail_df, summary_df):
+        detail_df  — one row per (feeder, date) with peak hours and offset
+        summary_df — one row per feeder with mean/median/std offset and
+                     the most common offset direction
+    """
+    load_df = load_df.copy()
+    temp_df = temp_df.copy()
+
+    load_df[time_col] = pd.to_datetime(load_df[time_col])
+    temp_df[time_col] = pd.to_datetime(temp_df[time_col])
+
+    for _df in (load_df, temp_df):
+        if _df[time_col].dt.tz is not None:
+            _df[time_col] = _df[time_col].dt.tz_convert("UTC").dt.tz_localize(None)
+
+    merged = pd.merge(load_df, temp_df, on=[time_col, poi_col], how="inner",
+                      suffixes=("_load", "_temp"))
+
+    if merged.empty:
+        print("No overlapping records after join.")
+        return pd.DataFrame(), pd.DataFrame()
+
+    merged[load_col] = merged[load_col].astype(float)
+    merged[temp_col] = merged[temp_col].astype(float)
+    merged = merged[merged[load_col].notna() & merged[temp_col].notna()]
+    merged["_date"] = merged[time_col].dt.date
+    merged["_hour"] = merged[time_col].dt.hour
+
+    detail_rows = []
+    for (feeder, date), day in merged.groupby([feeder_col, "_date"]):
+        if day.empty:
+            continue
+        peak_load_row = day.loc[day[load_col].idxmax()]
+        peak_temp_row = day.loc[day[temp_col].idxmax()]
+        peak_load_hour = int(peak_load_row["_hour"])
+        peak_temp_hour = int(peak_temp_row["_hour"])
+        offset = peak_load_hour - peak_temp_hour
+        detail_rows.append({
+            "feeder":          feeder,
+            "date":            date,
+            "peak_load_hour":  peak_load_hour,
+            "peak_load_value": round(float(peak_load_row[load_col]), 4),
+            "peak_temp_hour":  peak_temp_hour,
+            "peak_temp_value": round(float(peak_temp_row[temp_col]), 4),
+            "offset_hours":    offset,
+        })
+
+    if not detail_rows:
+        return pd.DataFrame(), pd.DataFrame()
+
+    detail_df = pd.DataFrame(detail_rows).sort_values(["feeder", "date"]).reset_index(drop=True)
+
+    summary_rows = []
+    for feeder, grp in detail_df.groupby("feeder"):
+        offsets = grp["offset_hours"]
+        mean_off   = offsets.mean()
+        median_off = offsets.median()
+        std_off    = offsets.std()
+        direction  = ("load lags temperature" if mean_off > 0
+                      else "load leads temperature" if mean_off < 0
+                      else "no offset")
+        summary_rows.append({
+            "feeder":         feeder,
+            "mean_offset_h":  round(mean_off,   3),
+            "median_offset_h": round(median_off, 3),
+            "std_offset_h":   round(std_off,    3),
+            "direction":      direction,
+            "n_days":         len(grp),
+        })
+        print(f"  [{feeder}]  mean offset={mean_off:+.1f}h  "
+              f"median={median_off:+.1f}h  std={std_off:.1f}h  "
+              f"→ {direction}")
+
+    summary_df = pd.DataFrame(summary_rows).reset_index(drop=True)
+    return detail_df, summary_df
+
+
 def rank_phase_mismatches(csv_path, phases=("A", "B", "C")):
     """
     Rank unexpected device pairs by mismatch confidence.
