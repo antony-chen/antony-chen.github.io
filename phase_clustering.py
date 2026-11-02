@@ -1360,8 +1360,15 @@ def forecast_load_with_offset(load_df, temp_df,
             print(f"  [{feeder}] insufficient overlap after shifting week-1 — skipped")
             continue
 
-        x_train = train_shifted[temp_col].values
-        y_train = train_shifted[load_col].values
+        # aggregate to one value per hour so the scatter has clean unique points
+        train_agg = (train_shifted
+                     .set_index(time_col)[[load_col, temp_col]]
+                     .resample("1h").mean()
+                     .dropna()
+                     .reset_index())
+
+        x_train = train_agg[temp_col].values
+        y_train = train_agg[load_col].values
         coef = np.polyfit(x_train, y_train, 1)
         slope, intercept = float(coef[0]), float(coef[1])
         train_r = float(np.corrcoef(x_train, y_train)[0, 1])
@@ -1383,15 +1390,22 @@ def forecast_load_with_offset(load_df, temp_df,
         ].copy()
         fload_w2[load_col] = fload_w2[load_col].astype(float)
 
-        week2 = pd.merge(
+        week2_raw = pd.merge(
             fload_w2[[time_col, feeder_col, load_col]],
             ftemp_w2[[time_col, "load_forecast"]],
             on=time_col, how="inner"
         ).dropna(subset=[load_col, "load_forecast"])
 
-        if week2.empty:
+        if week2_raw.empty:
             print(f"  [{feeder}] no overlapping records for week-2 comparison — skipped")
             continue
+
+        # aggregate to hourly mean to eliminate duplicates from multiple poi_ids
+        week2 = (week2_raw
+                 .set_index(time_col)[[load_col, "load_forecast"]]
+                 .resample("1h").mean()
+                 .dropna()
+                 .reset_index())
 
         y_actual   = week2[load_col].values
         y_forecast = week2["load_forecast"].values
@@ -1454,7 +1468,7 @@ def forecast_load_with_offset(load_df, temp_df,
         plt.setp(ax_ts1.get_xticklabels(), rotation=30, ha="right")
 
         # bottom: week-2 actual vs forecast (full width)
-        w2s = week2.set_index(time_col).sort_index()
+        w2s = week2.set_index(time_col)
         ax_fc.plot(w2s.index, w2s[load_col], color="steelblue", linewidth=0.9,
                    label="actual", alpha=0.9)
         ax_fc.plot(w2s.index, w2s["load_forecast"], color="crimson", linewidth=0.9,
