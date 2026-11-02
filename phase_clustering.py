@@ -1415,57 +1415,57 @@ def forecast_load_with_offset(load_df, temp_df,
         if not plot:
             continue
 
-        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+        import matplotlib.gridspec as gridspec
+        import matplotlib.dates as mdates
+
+        fig = plt.figure(figsize=(14, 10))
         fig.suptitle(f"Feeder: {feeder}  (offset={offset_h:+d}h)", fontsize=12)
+        gs = gridspec.GridSpec(2, 2, figure=fig, hspace=0.45, wspace=0.35)
+
+        ax_scatter = fig.add_subplot(gs[0, 0])
+        ax_ts1     = fig.add_subplot(gs[0, 1])
+        ax_fc      = fig.add_subplot(gs[1, :])   # full-width bottom
 
         # top-left: shifted week-1 scatter + fit
-        ax = axes[0, 0]
-        ax.scatter(x_train, y_train, s=8, alpha=0.4, linewidths=0)
+        ax_scatter.scatter(x_train, y_train, s=8, alpha=0.4, linewidths=0)
         xline = np.linspace(x_train.min(), x_train.max(), 200)
-        ax.plot(xline, np.polyval(coef, xline), color="crimson", linewidth=1.5,
-                label=f"slope={slope:.3g}  r={train_r:.3f}")
-        ax.set_xlabel(temp_col)
-        ax.set_ylabel(load_col)
-        ax.set_title(f"Week 1 (shifted {-offset_h:+d}h) — training fit  ({w1})")
-        ax.legend(fontsize=8)
+        ax_scatter.plot(xline, np.polyval(coef, xline), color="crimson", linewidth=1.5,
+                        label=f"slope={slope:.3g}  r={train_r:.3f}")
+        ax_scatter.set_xlabel(temp_col)
+        ax_scatter.set_ylabel(load_col)
+        ax_scatter.set_title(f"Week 1 (shifted {-offset_h:+d}h) — training fit  ({w1})")
+        ax_scatter.legend(fontsize=8)
 
-        # top-right: week-1 dual-axis time series (original)
-        ax2 = axes[0, 1]
+        # top-right: week-1 dual-axis time series
         ts1 = train_orig.set_index(time_col)[[load_col, temp_col]].sort_index().resample("1h").mean()
-        ax2.plot(ts1.index, ts1[load_col], color="steelblue", linewidth=0.7,
-                 label=load_col, alpha=0.85)
-        ax2.set_ylabel(load_col, color="steelblue")
-        ax2.tick_params(axis="y", labelcolor="steelblue")
-        ax2r = ax2.twinx()
-        ax2r.plot(ts1.index, ts1[temp_col], color="darkorange", linewidth=0.7,
-                  label=temp_col, alpha=0.85)
-        ax2r.set_ylabel(temp_col, color="darkorange")
-        ax2r.tick_params(axis="y", labelcolor="darkorange")
-        lines1 = ax2.get_lines() + ax2r.get_lines()
-        ax2.legend(lines1, [l.get_label() for l in lines1], fontsize=8, loc="upper left")
-        ax2.set_title(f"Week 1 — Load & Temperature  ({w1})")
+        ax_ts1.plot(ts1.index, ts1[load_col], color="steelblue", linewidth=0.7,
+                    label=load_col, alpha=0.85)
+        ax_ts1.set_ylabel(load_col, color="steelblue")
+        ax_ts1.tick_params(axis="y", labelcolor="steelblue")
+        ax_ts1r = ax_ts1.twinx()
+        ax_ts1r.plot(ts1.index, ts1[temp_col], color="darkorange", linewidth=0.7,
+                     label=temp_col, alpha=0.85)
+        ax_ts1r.set_ylabel(temp_col, color="darkorange")
+        ax_ts1r.tick_params(axis="y", labelcolor="darkorange")
+        lines1 = ax_ts1.get_lines() + ax_ts1r.get_lines()
+        ax_ts1.legend(lines1, [l.get_label() for l in lines1], fontsize=8, loc="upper left")
+        ax_ts1.set_title(f"Week 1 — Load & Temperature  ({w1})")
+        ax_ts1.xaxis.set_major_formatter(mdates.DateFormatter("%m/%d"))
+        plt.setp(ax_ts1.get_xticklabels(), rotation=30, ha="right")
 
-        # bottom-left: week-2 actual vs forecast time series
-        ax3 = axes[1, 0]
+        # bottom: week-2 actual vs forecast (full width)
         w2s = week2.set_index(time_col).sort_index()
-        ax3.plot(w2s.index, w2s[load_col], color="steelblue", linewidth=0.9,
-                 label="actual", alpha=0.9)
-        ax3.plot(w2s.index, w2s["load_forecast"], color="crimson", linewidth=0.9,
-                 linestyle="--", label="forecast", alpha=0.9)
-        ax3.set_ylabel(load_col)
-        ax3.set_title(f"Week 2 forecast vs actual  ({w2})\n"
-                      f"MAE={mae:.4g}  RMSE={rmse:.4g}  r={forecast_r:.3f}")
-        ax3.legend(fontsize=8)
+        ax_fc.plot(w2s.index, w2s[load_col], color="steelblue", linewidth=0.9,
+                   label="actual", alpha=0.9)
+        ax_fc.plot(w2s.index, w2s["load_forecast"], color="crimson", linewidth=0.9,
+                   linestyle="--", label="forecast", alpha=0.9)
+        ax_fc.set_ylabel(load_col)
+        ax_fc.set_title(f"Week 2 — forecast vs actual  ({w2})   "
+                        f"MAE={mae:.4g}  RMSE={rmse:.4g}  r={forecast_r:.3f}")
+        ax_fc.legend(fontsize=8)
+        ax_fc.xaxis.set_major_formatter(mdates.DateFormatter("%m/%d %H:%M"))
+        plt.setp(ax_fc.get_xticklabels(), rotation=30, ha="right")
 
-        # bottom-right: residuals
-        ax4 = axes[1, 1]
-        ax4.plot(w2s.index, w2s[load_col] - w2s["load_forecast"],
-                 color="purple", linewidth=0.8, alpha=0.85)
-        ax4.axhline(0, color="black", linewidth=0.8, linestyle="--")
-        ax4.set_ylabel(f"{load_col} residual (actual − forecast)")
-        ax4.set_title(f"Week 2 residuals  ({w2})")
-
-        fig.autofmt_xdate()
         fig.tight_layout()
         plt.show()
 
