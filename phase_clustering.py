@@ -1450,15 +1450,30 @@ def forecast_load_with_offset(load_df, temp_df,
         ax_scatter.set_title(f"Week 1 (shifted {-offset_h:+d}h) — training fit  ({w1})")
         ax_scatter.legend(fontsize=8)
 
-        # top-right: week-1 dual-axis time series
-        ts1 = train_orig.set_index(time_col)[[load_col, temp_col]].sort_index().resample("1h").mean()
-        ax_ts1.plot(ts1.index, ts1[load_col], color="steelblue", linewidth=0.7,
-                    label=load_col, alpha=0.85)
+        # top-right: week-1 dual-axis time series built from the raw source
+        # DataFrames so coverage isn't limited to the inner-join overlap
+        _load_w1 = load_df[
+            (load_df[feeder_col] == feeder) &
+            (load_df[time_col].dt.to_period("W") == w1)
+        ].copy()
+        _temp_w1 = temp_df[temp_df[time_col].dt.to_period("W") == w1].copy()
+        _load_w1[load_col] = _load_w1[load_col].astype(float)
+        _temp_w1[temp_col] = _temp_w1[temp_col].astype(float)
+
+        ts_load = (_load_w1.set_index(time_col)[load_col]
+                   .groupby(level=0).mean()
+                   .resample("1h").mean())   # keep NaN gaps, don't dropna
+        ts_temp = (_temp_w1.set_index(time_col)[temp_col]
+                   .groupby(level=0).mean()
+                   .resample("1h").mean())
+
+        ax_ts1.plot(ts_load.index, ts_load.values, color="steelblue",
+                    linewidth=0.7, label=load_col, alpha=0.85)
         ax_ts1.set_ylabel(load_col, color="steelblue")
         ax_ts1.tick_params(axis="y", labelcolor="steelblue")
         ax_ts1r = ax_ts1.twinx()
-        ax_ts1r.plot(ts1.index, ts1[temp_col], color="darkorange", linewidth=0.7,
-                     label=temp_col, alpha=0.85)
+        ax_ts1r.plot(ts_temp.index, ts_temp.values, color="darkorange",
+                     linewidth=0.7, label=temp_col, alpha=0.85)
         ax_ts1r.set_ylabel(temp_col, color="darkorange")
         ax_ts1r.tick_params(axis="y", labelcolor="darkorange")
         lines1 = ax_ts1.get_lines() + ax_ts1r.get_lines()
@@ -1468,7 +1483,10 @@ def forecast_load_with_offset(load_df, temp_df,
         plt.setp(ax_ts1.get_xticklabels(), rotation=30, ha="right")
 
         # bottom: week-2 actual vs forecast (full width)
-        w2s = week2.set_index(time_col)
+        # resample without dropna so NaN gaps break the line instead of
+        # connecting across missing timestamps with vertical-looking lines
+        w2s = (week2.set_index(time_col)[[load_col, "load_forecast"]]
+               .resample("1h").mean())
         ax_fc.plot(w2s.index, w2s[load_col], color="steelblue", linewidth=0.9,
                    label="actual", alpha=0.9)
         ax_fc.plot(w2s.index, w2s["load_forecast"], color="crimson", linewidth=0.9,
