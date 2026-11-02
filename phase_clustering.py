@@ -1257,6 +1257,221 @@ def compare_daily_peaks(load_df, temp_df,
     return detail_df, summary_df
 
 
+def forecast_load_with_offset(load_df, temp_df,
+                              load_col="load_kw",
+                              temp_col="temperature_f",
+                              time_col="timestamp",
+                              poi_col="poi_id",
+                              feeder_col="feeder",
+                              plot=True):
+    """
+    Offset-aware two-week load forecast per feeder.
+
+    1. Compute the median daily peak offset for week 1
+           offset = median(peak_load_hour - peak_temp_hour)
+    2. Shift week-1 load timestamps by -offset hours so load and temperature
+       peaks are aligned, then fit a linear regression (temp → shifted load).
+    3. Apply the model to week-2 temperatures.  The resulting forecast is in
+       "shifted time", so shift forecast timestamps forward by +offset hours
+       to put them back in original time coordinates.
+    4. Merge the re-shifted forecast with actual week-2 load on timestamp and
+       compute MAE, RMSE, and Pearson r.
+
+    Returns a dict keyed by feeder containing:
+        offset_h            — median peak offset used
+        slope, intercept    — week-1 model (fitted on shifted data)
+        train_r             — Pearson r of fit on shifted week-1 data
+        mae, rmse, forecast_r — week-2 evaluation metrics
+        week2               — DataFrame with actual load and load_forecast
+    """
+    load_df = load_df.copy()
+    temp_df = temp_df.copy()
+
+    load_df[time_col] = pd.to_datetime(load_df[time_col])
+    temp_df[time_col] = pd.to_datetime(temp_df[time_col])
+
+    for _df in (load_df, temp_df):
+        if _df[time_col].dt.tz is not None:
+            _df[time_col] = _df[time_col].dt.tz_convert("UTC").dt.tz_localize(None)
+
+    merged = pd.merge(load_df, temp_df, on=[time_col, poi_col], how="inner",
+                      suffixes=("_load", "_temp"))
+
+    if merged.empty:
+        print("No overlapping records after join.")
+        return {}
+
+    merged[load_col] = merged[load_col].astype(float)
+    merged[temp_col] = merged[temp_col].astype(float)
+    merged = merged[merged[load_col].notna() & merged[temp_col].notna()]
+    merged["_week"] = merged[time_col].dt.to_period("W")
+
+    results = {}
+    feeders = sorted(merged[feeder_col].dropna().unique())
+    print(f"{len(feeders)} feeder(s): {feeders}")
+
+    for feeder in feeders:
+        fdf = merged[merged[feeder_col] == feeder].copy()
+        weeks = sorted(fdf["_week"].unique())
+        if len(weeks) < 2:
+            print(f"  [{feeder}] fewer than 2 weeks of data — skipped")
+            continue
+
+        w1, w2 = weeks[0], weeks[1]
+        train_orig = fdf[fdf["_week"] == w1].copy()
+        test_orig  = fdf[fdf["_week"] == w2].copy()
+
+        if len(train_orig) < 2 or test_orig.empty:
+            print(f"  [{feeder}] insufficient data in one of the weeks — skipped")
+            continue
+
+        # ── step 1: compute median peak offset on week 1 ─────────────────────
+        train_orig["_date"] = train_orig[time_col].dt.date
+        train_orig["_hour"] = train_orig[time_col].dt.hour
+        day_offsets = []
+        for _, day in train_orig.groupby("_date"):
+            if day.empty:
+                continue
+            pl = int(day.loc[day[load_col].idxmax(), "_hour"])
+            pt = int(day.loc[day[temp_col].idxmax(), "_hour"])
+            day_offsets.append(pl - pt)
+        if not day_offsets:
+            print(f"  [{feeder}] could not compute peak offset — skipped")
+            continue
+        offset_h = int(round(float(np.median(day_offsets))))
+
+        # ── step 2: shift week-1 load back, re-merge, fit model ──────────────
+        fload_w1 = load_df[
+            (load_df[feeder_col] == feeder) &
+            (load_df[time_col].dt.to_period("W") == w1)
+        ].copy()
+        fload_w1_shifted = fload_w1.copy()
+        fload_w1_shifted[time_col] = fload_w1_shifted[time_col] - pd.Timedelta(hours=offset_h)
+
+        train_shifted = pd.merge(fload_w1_shifted, temp_df, on=[time_col, poi_col],
+                                 how="inner", suffixes=("_load", "_temp"))
+        train_shifted[load_col] = train_shifted[load_col].astype(float)
+        train_shifted[temp_col] = train_shifted[temp_col].astype(float)
+        train_shifted = train_shifted[
+            train_shifted[load_col].notna() & train_shifted[temp_col].notna()
+        ]
+
+        if len(train_shifted) < 2:
+            print(f"  [{feeder}] insufficient overlap after shifting week-1 — skipped")
+            continue
+
+        x_train = train_shifted[temp_col].values
+        y_train = train_shifted[load_col].values
+        coef = np.polyfit(x_train, y_train, 1)
+        slope, intercept = float(coef[0]), float(coef[1])
+        train_r = float(np.corrcoef(x_train, y_train)[0, 1])
+
+        # ── step 3: forecast week 2, re-shift timestamps forward ─────────────
+        ftemp_w2 = temp_df[
+            temp_df[time_col].dt.to_period("W") == w2
+        ].copy()
+        ftemp_w2[temp_col] = ftemp_w2[temp_col].astype(float)
+
+        # forecast is in shifted time; move timestamps +offset_h to restore
+        ftemp_w2["load_forecast"] = np.polyval(coef, ftemp_w2[temp_col].values)
+        ftemp_w2[time_col] = ftemp_w2[time_col] + pd.Timedelta(hours=offset_h)
+
+        # ── step 4: merge forecast with actual week-2 load, compute metrics ──
+        fload_w2 = load_df[
+            (load_df[feeder_col] == feeder) &
+            (load_df[time_col].dt.to_period("W") == w2)
+        ].copy()
+        fload_w2[load_col] = fload_w2[load_col].astype(float)
+
+        week2 = pd.merge(
+            fload_w2[[time_col, feeder_col, load_col]],
+            ftemp_w2[[time_col, "load_forecast"]],
+            on=time_col, how="inner"
+        ).dropna(subset=[load_col, "load_forecast"])
+
+        if week2.empty:
+            print(f"  [{feeder}] no overlapping records for week-2 comparison — skipped")
+            continue
+
+        y_actual   = week2[load_col].values
+        y_forecast = week2["load_forecast"].values
+        residuals  = y_actual - y_forecast
+        mae        = float(np.mean(np.abs(residuals)))
+        rmse       = float(np.sqrt(np.mean(residuals ** 2)))
+        with np.errstate(divide="ignore", invalid="ignore"):
+            forecast_r = float(np.corrcoef(y_actual, y_forecast)[0, 1])
+
+        print(f"  [{feeder}]  offset={offset_h:+d}h  "
+              f"week-1 r={train_r:.4f}  slope={slope:.4g}")
+        print(f"           week-2  MAE={mae:.4g}  RMSE={rmse:.4g}  "
+              f"forecast_r={forecast_r:.4f}")
+
+        results[feeder] = {
+            "offset_h": offset_h, "slope": slope, "intercept": intercept,
+            "train_r": train_r, "mae": mae, "rmse": rmse,
+            "forecast_r": forecast_r, "week2": week2,
+        }
+
+        if not plot:
+            continue
+
+        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+        fig.suptitle(f"Feeder: {feeder}  (offset={offset_h:+d}h)", fontsize=12)
+
+        # top-left: shifted week-1 scatter + fit
+        ax = axes[0, 0]
+        ax.scatter(x_train, y_train, s=8, alpha=0.4, linewidths=0)
+        xline = np.linspace(x_train.min(), x_train.max(), 200)
+        ax.plot(xline, np.polyval(coef, xline), color="crimson", linewidth=1.5,
+                label=f"slope={slope:.3g}  r={train_r:.3f}")
+        ax.set_xlabel(temp_col)
+        ax.set_ylabel(load_col)
+        ax.set_title(f"Week 1 (shifted {-offset_h:+d}h) — training fit  ({w1})")
+        ax.legend(fontsize=8)
+
+        # top-right: week-1 dual-axis time series (original)
+        ax2 = axes[0, 1]
+        ts1 = train_orig.set_index(time_col)[[load_col, temp_col]].sort_index().resample("1h").mean()
+        ax2.plot(ts1.index, ts1[load_col], color="steelblue", linewidth=0.7,
+                 label=load_col, alpha=0.85)
+        ax2.set_ylabel(load_col, color="steelblue")
+        ax2.tick_params(axis="y", labelcolor="steelblue")
+        ax2r = ax2.twinx()
+        ax2r.plot(ts1.index, ts1[temp_col], color="darkorange", linewidth=0.7,
+                  label=temp_col, alpha=0.85)
+        ax2r.set_ylabel(temp_col, color="darkorange")
+        ax2r.tick_params(axis="y", labelcolor="darkorange")
+        lines1 = ax2.get_lines() + ax2r.get_lines()
+        ax2.legend(lines1, [l.get_label() for l in lines1], fontsize=8, loc="upper left")
+        ax2.set_title(f"Week 1 — Load & Temperature  ({w1})")
+
+        # bottom-left: week-2 actual vs forecast time series
+        ax3 = axes[1, 0]
+        w2s = week2.set_index(time_col).sort_index()
+        ax3.plot(w2s.index, w2s[load_col], color="steelblue", linewidth=0.9,
+                 label="actual", alpha=0.9)
+        ax3.plot(w2s.index, w2s["load_forecast"], color="crimson", linewidth=0.9,
+                 linestyle="--", label="forecast", alpha=0.9)
+        ax3.set_ylabel(load_col)
+        ax3.set_title(f"Week 2 forecast vs actual  ({w2})\n"
+                      f"MAE={mae:.4g}  RMSE={rmse:.4g}  r={forecast_r:.3f}")
+        ax3.legend(fontsize=8)
+
+        # bottom-right: residuals
+        ax4 = axes[1, 1]
+        ax4.plot(w2s.index, w2s[load_col] - w2s["load_forecast"],
+                 color="purple", linewidth=0.8, alpha=0.85)
+        ax4.axhline(0, color="black", linewidth=0.8, linestyle="--")
+        ax4.set_ylabel(f"{load_col} residual (actual − forecast)")
+        ax4.set_title(f"Week 2 residuals  ({w2})")
+
+        fig.autofmt_xdate()
+        fig.tight_layout()
+        plt.show()
+
+    return results
+
+
 def rank_phase_mismatches(csv_path, phases=("A", "B", "C")):
     """
     Rank unexpected device pairs by mismatch confidence.
