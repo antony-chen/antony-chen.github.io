@@ -1210,31 +1210,46 @@ def compare_daily_peaks(load_df, temp_df,
         fmerge_shift[temp_col] = fmerge_shift[temp_col].astype(float)
         fmerge_shift = fmerge_shift[fmerge_shift[load_col].notna() & fmerge_shift[temp_col].notna()]
 
-        def _scatter_with_fit(ax, x, y, title):
-            ax.scatter(x, y, s=7, alpha=0.35, linewidths=0, color="steelblue")
+        def _draw_row(axes_row, df_, row_label):
+            """Fill one row (scatter + dual-axis time series) for a merged df."""
+            x = df_[temp_col].values
+            y = df_[load_col].values
+
+            # left: scatter with regression line
+            ax_s = axes_row[0]
+            ax_s.scatter(x, y, s=7, alpha=0.35, linewidths=0, color="steelblue")
             if len(x) >= 2:
-                coef = np.polyfit(x, y, 1)
-                r    = float(np.corrcoef(x, y)[0, 1])
+                coef  = np.polyfit(x, y, 1)
+                r     = float(np.corrcoef(x, y)[0, 1])
                 xline = np.linspace(x.min(), x.max(), 200)
-                ax.plot(xline, np.polyval(coef, xline), color="crimson",
-                        linewidth=1.5, label=f"slope={coef[0]:.3g}  r={r:.3f}")
-                ax.legend(fontsize=8)
-            ax.set_xlabel(temp_col)
-            ax.set_ylabel(load_col)
-            ax.set_title(title)
+                ax_s.plot(xline, np.polyval(coef, xline), color="crimson",
+                          linewidth=1.5, label=f"slope={coef[0]:.3g}  r={r:.3f}")
+                ax_s.legend(fontsize=8)
+            ax_s.set_xlabel(temp_col)
+            ax_s.set_ylabel(load_col)
+            ax_s.set_title(f"{row_label} — Load vs Temperature")
 
-        fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-        fig.suptitle(f"Feeder: {feeder}  —  peak offset analysis", fontsize=11)
+            # right: dual-axis time series
+            ax_t = axes_row[1]
+            ts = df_.set_index(time_col)[[load_col, temp_col]].sort_index().resample("1h").mean()
+            ax_t.plot(ts.index, ts[load_col], color="steelblue", linewidth=0.7,
+                      label=load_col, alpha=0.85)
+            ax_t.set_ylabel(load_col, color="steelblue")
+            ax_t.tick_params(axis="y", labelcolor="steelblue")
+            ax_tr = ax_t.twinx()
+            ax_tr.plot(ts.index, ts[temp_col], color="darkorange", linewidth=0.7,
+                       label=temp_col, alpha=0.85)
+            ax_tr.set_ylabel(temp_col, color="darkorange")
+            ax_tr.tick_params(axis="y", labelcolor="darkorange")
+            lines_ = ax_t.get_lines() + ax_tr.get_lines()
+            ax_t.legend(lines_, [l.get_label() for l in lines_], fontsize=8, loc="upper left")
+            ax_t.set_title(f"{row_label} — Load & Temperature over Time")
 
-        _scatter_with_fit(axes[0],
-                          fmerge_orig[temp_col].values,
-                          fmerge_orig[load_col].values,
-                          f"Original  (median offset={median_off:+.1f}h)")
-        _scatter_with_fit(axes[1],
-                          fmerge_shift[temp_col].values,
-                          fmerge_shift[load_col].values,
-                          f"After shifting load {shift:+d}h")
-
+        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+        fig.suptitle(f"Feeder: {feeder}  —  peak offset analysis", fontsize=12)
+        _draw_row(axes[0], fmerge_orig,  f"Original (median offset={median_off:+.1f}h)")
+        _draw_row(axes[1], fmerge_shift, f"Shifted load {shift:+d}h")
+        fig.autofmt_xdate()
         fig.tight_layout()
         plt.show()
 
