@@ -1100,7 +1100,8 @@ def compare_daily_peaks(load_df, temp_df,
                         temp_col="temperature_f",
                         time_col="timestamp",
                         poi_col="poi_id",
-                        feeder_col="feeder"):
+                        feeder_col="feeder",
+                        plot=True):
     """
     For each feeder and each calendar day, find the hour of peak load and
     the hour of peak temperature, then compute the offset between them.
@@ -1109,10 +1110,15 @@ def compare_daily_peaks(load_df, temp_df,
       positive → load peaks AFTER temperature (load lags temperature)
       negative → load peaks BEFORE temperature (load leads temperature)
 
+    When plot=True, renders a two-panel scatter per feeder:
+      left  — load vs temperature, original alignment
+      right — load vs temperature after shifting load by -median_offset hours
+               so peaks are as closely aligned as possible
+
     Returns a tuple (detail_df, summary_df):
         detail_df  — one row per (feeder, date) with peak hours and offset
-        summary_df — one row per feeder with mean/median/std offset and
-                     the most common offset direction
+        summary_df — one row per feeder with mean/median/std offset,
+                     direction, and the applied shift in the aligned plot
     """
     load_df = load_df.copy()
     temp_df = temp_df.copy()
@@ -1163,24 +1169,74 @@ def compare_daily_peaks(load_df, temp_df,
 
     summary_rows = []
     for feeder, grp in detail_df.groupby("feeder"):
-        offsets = grp["offset_hours"]
+        offsets    = grp["offset_hours"]
         mean_off   = offsets.mean()
         median_off = offsets.median()
         std_off    = offsets.std()
+        shift      = -int(round(median_off))   # hours to shift load to align peaks
         direction  = ("load lags temperature" if mean_off > 0
                       else "load leads temperature" if mean_off < 0
                       else "no offset")
         summary_rows.append({
-            "feeder":         feeder,
-            "mean_offset_h":  round(mean_off,   3),
+            "feeder":          feeder,
+            "mean_offset_h":   round(mean_off,   3),
             "median_offset_h": round(median_off, 3),
-            "std_offset_h":   round(std_off,    3),
-            "direction":      direction,
-            "n_days":         len(grp),
+            "std_offset_h":    round(std_off,    3),
+            "direction":       direction,
+            "applied_shift_h": shift,
+            "n_days":          len(grp),
         })
         print(f"  [{feeder}]  mean offset={mean_off:+.1f}h  "
               f"median={median_off:+.1f}h  std={std_off:.1f}h  "
-              f"→ {direction}")
+              f"→ {direction}  (applied shift: {shift:+d}h)")
+
+        if not plot:
+            continue
+
+        # ── build original and shifted merged data for this feeder ───────────
+        fload = load_df[load_df[feeder_col] == feeder].copy()
+        fmerge_orig = pd.merge(fload, temp_df, on=[time_col, poi_col], how="inner",
+                               suffixes=("_load", "_temp"))
+        fmerge_orig[load_col] = fmerge_orig[load_col].astype(float)
+        fmerge_orig[temp_col] = fmerge_orig[temp_col].astype(float)
+        fmerge_orig = fmerge_orig[fmerge_orig[load_col].notna() & fmerge_orig[temp_col].notna()]
+
+        # shift load timestamps by `shift` hours, then re-merge with temp
+        fload_shifted = fload.copy()
+        fload_shifted[time_col] = fload_shifted[time_col] + pd.Timedelta(hours=shift)
+        fmerge_shift = pd.merge(fload_shifted, temp_df, on=[time_col, poi_col], how="inner",
+                                suffixes=("_load", "_temp"))
+        fmerge_shift[load_col] = fmerge_shift[load_col].astype(float)
+        fmerge_shift[temp_col] = fmerge_shift[temp_col].astype(float)
+        fmerge_shift = fmerge_shift[fmerge_shift[load_col].notna() & fmerge_shift[temp_col].notna()]
+
+        def _scatter_with_fit(ax, x, y, title):
+            ax.scatter(x, y, s=7, alpha=0.35, linewidths=0, color="steelblue")
+            if len(x) >= 2:
+                coef = np.polyfit(x, y, 1)
+                r    = float(np.corrcoef(x, y)[0, 1])
+                xline = np.linspace(x.min(), x.max(), 200)
+                ax.plot(xline, np.polyval(coef, xline), color="crimson",
+                        linewidth=1.5, label=f"slope={coef[0]:.3g}  r={r:.3f}")
+                ax.legend(fontsize=8)
+            ax.set_xlabel(temp_col)
+            ax.set_ylabel(load_col)
+            ax.set_title(title)
+
+        fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+        fig.suptitle(f"Feeder: {feeder}  —  peak offset analysis", fontsize=11)
+
+        _scatter_with_fit(axes[0],
+                          fmerge_orig[temp_col].values,
+                          fmerge_orig[load_col].values,
+                          f"Original  (median offset={median_off:+.1f}h)")
+        _scatter_with_fit(axes[1],
+                          fmerge_shift[temp_col].values,
+                          fmerge_shift[load_col].values,
+                          f"After shifting load {shift:+d}h")
+
+        fig.tight_layout()
+        plt.show()
 
     summary_df = pd.DataFrame(summary_rows).reset_index(drop=True)
     return detail_df, summary_df
