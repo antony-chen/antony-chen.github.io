@@ -1017,32 +1017,77 @@ def forecast_load_from_temperature(load_df, temp_df,
         if not plot:
             continue
 
-        fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-        fig.suptitle(f"Feeder: {feeder}", fontsize=11)
+        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+        fig.suptitle(f"Feeder: {feeder}", fontsize=12)
 
-        # left — week 1 scatter + fit line
-        ax = axes[0]
-        ax.scatter(x_train, y_train, s=8, alpha=0.45, linewidths=0,
-                   label=f"week 1 data  (r={train_r:.3f})")
-        xline = np.linspace(x_train.min(), x_train.max(), 200)
-        ax.plot(xline, np.polyval(coef, xline), color="crimson", linewidth=1.5,
-                label=f"fit: slope={slope:.3g}")
+        all_x = fdf[temp_col].values
+        all_y = fdf[load_col].values
+        overall_coef = np.polyfit(all_x, all_y, 1)
+        overall_r    = float(np.corrcoef(all_x, all_y)[0, 1])
+        xline_all    = np.linspace(all_x.min(), all_x.max(), 200)
+
+        # ── top-left: temp vs load scatter (all data) with per-week lines ──
+        ax = axes[0, 0]
+        ax.scatter(all_x, all_y, s=6, alpha=0.3, linewidths=0, color="steelblue")
+        week_cmap = plt.get_cmap("tab20")
+        for idx, (week, wdf_) in enumerate(fdf.groupby("_week")):
+            wx, wy = wdf_[temp_col].values, wdf_[load_col].values
+            if len(wx) < 2:
+                continue
+            wcoef = np.polyfit(wx, wy, 1)
+            wr    = float(np.corrcoef(wx, wy)[0, 1])
+            ax.plot(xline_all, np.polyval(wcoef, xline_all),
+                    color=week_cmap(idx % 20), linewidth=0.9, alpha=0.6,
+                    label=f"{week}  r={wr:.2f}")
+        ax.plot(xline_all, np.polyval(overall_coef, xline_all),
+                color="crimson", linewidth=2.0, zorder=10,
+                label=f"overall  r={overall_r:.3f}")
         ax.set_xlabel(temp_col)
         ax.set_ylabel(load_col)
-        ax.set_title(f"Week 1 fit  ({w1})")
-        ax.legend(fontsize=8)
+        ax.set_title("Load vs Temperature (all data)")
+        ax.legend(fontsize=6, loc="upper left")
 
-        # right — week 2 actual vs forecast time series
-        ax2 = axes[1]
+        # ── top-right: dual-axis time series (all data) ──────────────────────
+        ax2 = axes[0, 1]
+        ts_all = fdf.set_index(time_col)[[load_col, temp_col]].sort_index().resample("1h").mean()
+        color_load, color_temp = "steelblue", "darkorange"
+        ax2.plot(ts_all.index, ts_all[load_col], color=color_load,
+                 linewidth=0.7, label=load_col, alpha=0.85)
+        ax2.set_ylabel(load_col, color=color_load)
+        ax2.tick_params(axis="y", labelcolor=color_load)
+        ax_r2 = ax2.twinx()
+        ax_r2.plot(ts_all.index, ts_all[temp_col], color=color_temp,
+                   linewidth=0.7, label=temp_col, alpha=0.85)
+        ax_r2.set_ylabel(temp_col, color=color_temp)
+        ax_r2.tick_params(axis="y", labelcolor=color_temp)
+        lines2 = ax2.get_lines() + ax_r2.get_lines()
+        ax2.legend(lines2, [l.get_label() for l in lines2], fontsize=8, loc="upper left")
+        ax2.set_title("Load & Temperature over Time")
+
+        # ── bottom-left: week 1 scatter + fit line ────────────────────────────
+        ax3 = axes[1, 0]
+        ax3.scatter(x_train, y_train, s=8, alpha=0.45, linewidths=0,
+                    label=f"week 1 data  (r={train_r:.3f})")
+        xline_w1 = np.linspace(x_train.min(), x_train.max(), 200)
+        ax3.plot(xline_w1, np.polyval(coef, xline_w1), color="crimson",
+                 linewidth=1.5, label=f"fit: slope={slope:.3g}")
+        ax3.set_xlabel(temp_col)
+        ax3.set_ylabel(load_col)
+        ax3.set_title(f"Week 1 training fit  ({w1})")
+        ax3.legend(fontsize=8)
+
+        # ── bottom-right: week 2 actual vs forecast ───────────────────────────
+        ax4 = axes[1, 1]
         test_sorted = test.set_index(time_col).sort_index()
-        ax2.plot(test_sorted.index, test_sorted[load_col], color="steelblue",
+        ax4.plot(test_sorted.index, test_sorted[load_col], color="steelblue",
                  linewidth=0.9, label="actual", alpha=0.9)
-        ax2.plot(test_sorted.index, test_sorted["load_forecast"], color="crimson",
+        ax4.plot(test_sorted.index, test_sorted["load_forecast"], color="crimson",
                  linewidth=0.9, linestyle="--", label="forecast", alpha=0.9)
-        ax2.set_ylabel(load_col)
-        ax2.set_title(f"Week 2 forecast vs actual  ({w2})\n"
+        ax4.set_ylabel(load_col)
+        ax4.set_title(f"Week 2 forecast vs actual  ({w2})\n"
                       f"MAE={mae:.4g}  RMSE={rmse:.4g}  r={forecast_r:.3f}")
-        ax2.legend(fontsize=8)
+        ax4.legend(fontsize=8)
+
         fig.autofmt_xdate()
         fig.tight_layout()
         plt.show()
