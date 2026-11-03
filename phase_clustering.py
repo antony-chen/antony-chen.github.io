@@ -983,35 +983,42 @@ def forecast_load_from_temperature(load_df, temp_df,
             print(f"  [{feeder}] insufficient data in one of the weeks — skipped")
             continue
 
-        # fit on week 1
+        # fit linear and quadratic models on week 1
         x_train = train[temp_col].values
         y_train = train[load_col].values
-        coef = np.polyfit(x_train, y_train, 1)
-        slope, intercept = float(coef[0]), float(coef[1])
+        coef1 = np.polyfit(x_train, y_train, 1)
+        coef2 = np.polyfit(x_train, y_train, 2)
+        slope, intercept = float(coef1[0]), float(coef1[1])
         train_r = float(np.corrcoef(x_train, y_train)[0, 1])
 
-        # forecast week 2
+        # forecast week 2 with both models
         x_test = test[temp_col].values
         y_actual = test[load_col].values
-        y_forecast = np.polyval(coef, x_test)
+        y_fc_lin  = np.polyval(coef1, x_test)
+        y_fc_quad = np.polyval(coef2, x_test)
         test = test.copy()
-        test["load_forecast"] = y_forecast
+        test["load_forecast"]      = y_fc_lin
+        test["load_forecast_quad"] = y_fc_quad
 
-        residuals = y_actual - y_forecast
-        mae  = float(np.mean(np.abs(residuals)))
-        rmse = float(np.sqrt(np.mean(residuals ** 2)))
-        with np.errstate(divide="ignore", invalid="ignore"):
-            forecast_r = float(np.corrcoef(y_actual, y_forecast)[0, 1])
+        def _m(ya, yf):
+            r = ya - yf
+            with np.errstate(divide="ignore", invalid="ignore"):
+                return (float(np.mean(np.abs(r))), float(np.sqrt(np.mean(r ** 2))),
+                        float(np.corrcoef(ya, yf)[0, 1]))
+
+        mae,  rmse,  forecast_r  = _m(y_actual, y_fc_lin)
+        mae2, rmse2, forecast_r2 = _m(y_actual, y_fc_quad)
 
         print(f"  [{feeder}]  week 1 ({w1})  r={train_r:.4f}  "
               f"slope={slope:.4g}  intercept={intercept:.4g}")
-        print(f"           week 2 ({w2})  MAE={mae:.4g}  RMSE={rmse:.4g}  "
-              f"forecast_r={forecast_r:.4f}")
+        print(f"           week 2 ({w2})  linear:    MAE={mae:.4g}  RMSE={rmse:.4g}  r={forecast_r:.4f}")
+        print(f"                          quadratic: MAE={mae2:.4g}  RMSE={rmse2:.4g}  r={forecast_r2:.4f}")
 
         results[feeder] = {
             "slope": slope, "intercept": intercept, "train_r": train_r,
             "mae": mae, "rmse": rmse, "forecast_r": forecast_r,
-            "week2": test,
+            "mae_quad": mae2, "rmse_quad": rmse2, "forecast_r_quad": forecast_r2,
+            "coef_quad": coef2.tolist(), "week2": test,
         }
 
         if not plot:
@@ -1069,8 +1076,10 @@ def forecast_load_from_temperature(load_df, temp_df,
         ax3.scatter(x_train, y_train, s=8, alpha=0.45, linewidths=0,
                     label=f"week 1 data  (r={train_r:.3f})")
         xline_w1 = np.linspace(x_train.min(), x_train.max(), 200)
-        ax3.plot(xline_w1, np.polyval(coef, xline_w1), color="crimson",
-                 linewidth=1.5, label=f"fit: slope={slope:.3g}")
+        ax3.plot(xline_w1, np.polyval(coef1, xline_w1), color="crimson",
+                 linewidth=1.5, label=f"linear  slope={slope:.3g}")
+        ax3.plot(xline_w1, np.polyval(coef2, xline_w1), color="darkorange",
+                 linewidth=1.5, linestyle="--", label="quadratic")
         ax3.set_xlabel(temp_col)
         ax3.set_ylabel(load_col)
         ax3.set_title(f"Week 1 training fit  ({w1})")
@@ -1082,10 +1091,13 @@ def forecast_load_from_temperature(load_df, temp_df,
         ax4.plot(test_sorted.index, test_sorted[load_col], color="steelblue",
                  linewidth=0.9, label="actual", alpha=0.9)
         ax4.plot(test_sorted.index, test_sorted["load_forecast"], color="crimson",
-                 linewidth=0.9, linestyle="--", label="forecast", alpha=0.9)
+                 linewidth=0.9, linestyle="--",
+                 label=f"linear  MAE={mae:.4g}  r={forecast_r:.3f}", alpha=0.9)
+        ax4.plot(test_sorted.index, test_sorted["load_forecast_quad"], color="darkorange",
+                 linewidth=0.9, linestyle=":",
+                 label=f"quadratic  MAE={mae2:.4g}  r={forecast_r2:.3f}", alpha=0.9)
         ax4.set_ylabel(load_col)
-        ax4.set_title(f"Week 2 forecast vs actual  ({w2})\n"
-                      f"MAE={mae:.4g}  RMSE={rmse:.4g}  r={forecast_r:.3f}")
+        ax4.set_title(f"Week 2 forecast vs actual  ({w2})")
         ax4.legend(fontsize=8)
 
         fig.autofmt_xdate()
@@ -1369,8 +1381,9 @@ def forecast_load_with_offset(load_df, temp_df,
 
         x_train = train_agg[temp_col].values
         y_train = train_agg[load_col].values
-        coef = np.polyfit(x_train, y_train, 1)
-        slope, intercept = float(coef[0]), float(coef[1])
+        coef1 = np.polyfit(x_train, y_train, 1)
+        coef2 = np.polyfit(x_train, y_train, 2)
+        slope, intercept = float(coef1[0]), float(coef1[1])
         train_r = float(np.corrcoef(x_train, y_train)[0, 1])
 
         # ── step 3: forecast week 2, re-shift timestamps forward ─────────────
@@ -1380,7 +1393,8 @@ def forecast_load_with_offset(load_df, temp_df,
         ftemp_w2[temp_col] = ftemp_w2[temp_col].astype(float)
 
         # forecast is in shifted time; move timestamps +offset_h to restore
-        ftemp_w2["load_forecast"] = np.polyval(coef, ftemp_w2[temp_col].values)
+        ftemp_w2["load_forecast"]      = np.polyval(coef1, ftemp_w2[temp_col].values)
+        ftemp_w2["load_forecast_quad"] = np.polyval(coef2, ftemp_w2[temp_col].values)
         ftemp_w2[time_col] = ftemp_w2[time_col] + pd.Timedelta(hours=offset_h)
 
         # ── step 4: merge forecast with actual week-2 load, compute metrics ──
@@ -1392,9 +1406,9 @@ def forecast_load_with_offset(load_df, temp_df,
 
         week2_raw = pd.merge(
             fload_w2[[time_col, feeder_col, load_col]],
-            ftemp_w2[[time_col, "load_forecast"]],
+            ftemp_w2[[time_col, "load_forecast", "load_forecast_quad"]],
             on=time_col, how="inner"
-        ).dropna(subset=[load_col, "load_forecast"])
+        ).dropna(subset=[load_col, "load_forecast", "load_forecast_quad"])
 
         if week2_raw.empty:
             print(f"  [{feeder}] no overlapping records for week-2 comparison — skipped")
@@ -1402,28 +1416,34 @@ def forecast_load_with_offset(load_df, temp_df,
 
         # aggregate to hourly mean to eliminate duplicates from multiple poi_ids
         week2 = (week2_raw
-                 .set_index(time_col)[[load_col, "load_forecast"]]
+                 .set_index(time_col)[[load_col, "load_forecast", "load_forecast_quad"]]
                  .resample("1h").mean()
                  .dropna()
                  .reset_index())
 
-        y_actual   = week2[load_col].values
-        y_forecast = week2["load_forecast"].values
-        residuals  = y_actual - y_forecast
-        mae        = float(np.mean(np.abs(residuals)))
-        rmse       = float(np.sqrt(np.mean(residuals ** 2)))
+        y_actual  = week2[load_col].values
+        y_fc_lin  = week2["load_forecast"].values
+        y_fc_quad = week2["load_forecast_quad"].values
+        res_lin   = y_actual - y_fc_lin
+        res_quad  = y_actual - y_fc_quad
+        mae       = float(np.mean(np.abs(res_lin)))
+        rmse      = float(np.sqrt(np.mean(res_lin ** 2)))
+        mae2      = float(np.mean(np.abs(res_quad)))
+        rmse2     = float(np.sqrt(np.mean(res_quad ** 2)))
         with np.errstate(divide="ignore", invalid="ignore"):
-            forecast_r = float(np.corrcoef(y_actual, y_forecast)[0, 1])
+            forecast_r  = float(np.corrcoef(y_actual, y_fc_lin)[0, 1])
+            forecast_r2 = float(np.corrcoef(y_actual, y_fc_quad)[0, 1])
 
         print(f"  [{feeder}]  offset={offset_h:+d}h  "
               f"week-1 r={train_r:.4f}  slope={slope:.4g}")
-        print(f"           week-2  MAE={mae:.4g}  RMSE={rmse:.4g}  "
-              f"forecast_r={forecast_r:.4f}")
+        print(f"           week-2  linear:    MAE={mae:.4g}  RMSE={rmse:.4g}  r={forecast_r:.4f}")
+        print(f"                   quadratic: MAE={mae2:.4g}  RMSE={rmse2:.4g}  r={forecast_r2:.4f}")
 
         results[feeder] = {
             "offset_h": offset_h, "slope": slope, "intercept": intercept,
-            "train_r": train_r, "mae": mae, "rmse": rmse,
-            "forecast_r": forecast_r, "week2": week2,
+            "train_r": train_r, "mae": mae, "rmse": rmse, "forecast_r": forecast_r,
+            "mae_quad": mae2, "rmse_quad": rmse2, "forecast_r_quad": forecast_r2,
+            "coef_quad": coef2.tolist(), "week2": week2,
         }
 
         if not plot:
@@ -1443,8 +1463,10 @@ def forecast_load_with_offset(load_df, temp_df,
         # top-left: shifted week-1 scatter + fit
         ax_scatter.scatter(x_train, y_train, s=8, alpha=0.4, linewidths=0)
         xline = np.linspace(x_train.min(), x_train.max(), 200)
-        ax_scatter.plot(xline, np.polyval(coef, xline), color="crimson", linewidth=1.5,
-                        label=f"slope={slope:.3g}  r={train_r:.3f}")
+        ax_scatter.plot(xline, np.polyval(coef1, xline), color="crimson", linewidth=1.5,
+                        label=f"linear  slope={slope:.3g}  r={train_r:.3f}")
+        ax_scatter.plot(xline, np.polyval(coef2, xline), color="darkorange", linewidth=1.5,
+                        linestyle="--", label="quadratic")
         ax_scatter.set_xlabel(temp_col)
         ax_scatter.set_ylabel(load_col)
         ax_scatter.set_title(f"Week 1 (shifted {-offset_h:+d}h) — training fit  ({w1})")
@@ -1488,15 +1510,18 @@ def forecast_load_with_offset(load_df, temp_df,
         # bottom: week-2 actual vs forecast (full width)
         # resample without dropna so NaN gaps break the line instead of
         # connecting across missing timestamps with vertical-looking lines
-        w2s = (week2.set_index(time_col)[[load_col, "load_forecast"]]
+        w2s = (week2.set_index(time_col)[[load_col, "load_forecast", "load_forecast_quad"]]
                .resample("1h").mean())
         ax_fc.plot(w2s.index, w2s[load_col], color="steelblue", linewidth=0.9,
                    label="actual", alpha=0.9)
         ax_fc.plot(w2s.index, w2s["load_forecast"], color="crimson", linewidth=0.9,
-                   linestyle="--", label="forecast", alpha=0.9)
+                   linestyle="--",
+                   label=f"linear  MAE={mae:.4g}  r={forecast_r:.3f}", alpha=0.9)
+        ax_fc.plot(w2s.index, w2s["load_forecast_quad"], color="darkorange", linewidth=0.9,
+                   linestyle=":",
+                   label=f"quadratic  MAE={mae2:.4g}  r={forecast_r2:.3f}", alpha=0.9)
         ax_fc.set_ylabel(load_col)
-        ax_fc.set_title(f"Week 2 — forecast vs actual  ({w2})   "
-                        f"MAE={mae:.4g}  RMSE={rmse:.4g}  r={forecast_r:.3f}")
+        ax_fc.set_title(f"Week 2 — forecast vs actual  ({w2})")
         ax_fc.legend(fontsize=8)
         ax_fc.xaxis.set_major_formatter(mdates.DateFormatter("%m/%d %H:%M"))
         plt.setp(ax_fc.get_xticklabels(), rotation=30, ha="right")
