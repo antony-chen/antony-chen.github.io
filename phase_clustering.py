@@ -962,22 +962,22 @@ def forecast_load_from_temperature(load_df, temp_df,
     merged[temp_col] = merged[temp_col].astype(float)
     merged = merged[merged[load_col].notna() & merged[temp_col].notna()]
 
-    merged["_week"] = merged[time_col].dt.to_period("W")
-
     results = {}
     feeders = sorted(merged[feeder_col].dropna().unique())
     print(f"{len(feeders)} feeder(s): {feeders}")
 
     for feeder in feeders:
         fdf = merged[merged[feeder_col] == feeder].copy()
-        weeks = sorted(fdf["_week"].unique())
-        if len(weeks) < 2:
-            print(f"  [{feeder}] fewer than 2 weeks of data — skipped")
+        t_start = fdf[time_col].min()
+        t_split = t_start + pd.Timedelta(days=7)
+        if fdf[time_col].max() <= t_split:
+            print(f"  [{feeder}] less than 2 weeks of data — skipped")
             continue
-
-        w1, w2 = weeks[0], weeks[1]
-        train = fdf[fdf["_week"] == w1].copy()
-        test  = fdf[fdf["_week"] == w2].copy()
+        train = fdf[fdf[time_col] < t_split].copy()
+        test  = fdf[fdf[time_col] >= t_split].copy()
+        w1 = f"{t_start.date()} – {(t_start + pd.Timedelta(days=6)).date()}"
+        w2 = f"{t_split.date()} – {fdf[time_col].max().date()}"
+        fdf["_week"] = fdf[time_col].dt.to_period("W")  # for scatter coloring only
 
         if len(train) < 2 or test.empty:
             print(f"  [{feeder}] insufficient data in one of the weeks — skipped")
@@ -1304,22 +1304,21 @@ def forecast_load_with_offset(load_df, temp_df,
     merged[load_col] = merged[load_col].astype(float)
     merged[temp_col] = merged[temp_col].astype(float)
     merged = merged[merged[load_col].notna() & merged[temp_col].notna()]
-    merged["_week"] = merged[time_col].dt.to_period("W")
-
     results = {}
     feeders = sorted(merged[feeder_col].dropna().unique())
     print(f"{len(feeders)} feeder(s): {feeders}")
 
     for feeder in feeders:
         fdf = merged[merged[feeder_col] == feeder].copy()
-        weeks = sorted(fdf["_week"].unique())
-        if len(weeks) < 2:
-            print(f"  [{feeder}] fewer than 2 weeks of data — skipped")
+        t_start = fdf[time_col].min()
+        t_split = t_start + pd.Timedelta(days=7)
+        if fdf[time_col].max() <= t_split:
+            print(f"  [{feeder}] less than 2 weeks of data — skipped")
             continue
-
-        w1, w2 = weeks[0], weeks[1]
-        train_orig = fdf[fdf["_week"] == w1].copy()
-        test_orig  = fdf[fdf["_week"] == w2].copy()
+        train_orig = fdf[fdf[time_col] < t_split].copy()
+        test_orig  = fdf[fdf[time_col] >= t_split].copy()
+        w1 = f"{t_start.date()} – {(t_start + pd.Timedelta(days=6)).date()}"
+        w2 = f"{t_split.date()} – {fdf[time_col].max().date()}"
 
         if len(train_orig) < 2 or test_orig.empty:
             print(f"  [{feeder}] insufficient data in one of the weeks — skipped")
@@ -1343,7 +1342,8 @@ def forecast_load_with_offset(load_df, temp_df,
         # ── step 2: shift week-1 load back, re-merge, fit model ──────────────
         fload_w1 = load_df[
             (load_df[feeder_col] == feeder) &
-            (load_df[time_col].dt.to_period("W") == w1)
+            (load_df[time_col] >= t_start) &
+            (load_df[time_col] < t_split)
         ].copy()
         fload_w1_shifted = fload_w1.copy()
         fload_w1_shifted[time_col] = fload_w1_shifted[time_col] - pd.Timedelta(hours=offset_h)
@@ -1375,7 +1375,7 @@ def forecast_load_with_offset(load_df, temp_df,
 
         # ── step 3: forecast week 2, re-shift timestamps forward ─────────────
         ftemp_w2 = temp_df[
-            temp_df[time_col].dt.to_period("W") == w2
+            temp_df[time_col] >= t_split
         ].copy()
         ftemp_w2[temp_col] = ftemp_w2[temp_col].astype(float)
 
@@ -1386,7 +1386,7 @@ def forecast_load_with_offset(load_df, temp_df,
         # ── step 4: merge forecast with actual week-2 load, compute metrics ──
         fload_w2 = load_df[
             (load_df[feeder_col] == feeder) &
-            (load_df[time_col].dt.to_period("W") == w2)
+            (load_df[time_col] >= t_split)
         ].copy()
         fload_w2[load_col] = fload_w2[load_col].astype(float)
 
@@ -1454,9 +1454,12 @@ def forecast_load_with_offset(load_df, temp_df,
         # DataFrames so coverage isn't limited to the inner-join overlap
         _load_w1 = load_df[
             (load_df[feeder_col] == feeder) &
-            (load_df[time_col].dt.to_period("W") == w1)
+            (load_df[time_col] >= t_start) &
+            (load_df[time_col] < t_split)
         ].copy()
-        _temp_w1 = temp_df[temp_df[time_col].dt.to_period("W") == w1].copy()
+        _temp_w1 = temp_df[
+            (temp_df[time_col] >= t_start) & (temp_df[time_col] < t_split)
+        ].copy()
         _load_w1[load_col] = _load_w1[load_col].astype(float)
         _temp_w1[temp_col] = _temp_w1[temp_col].astype(float)
 
