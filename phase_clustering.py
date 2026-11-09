@@ -927,20 +927,25 @@ def forecast_load_from_temperature(load_df, temp_df,
                                    time_col="timestamp",
                                    poi_col="poi_id",
                                    feeder_col="feeder",
-                                   plot=True,
-                                   periodic_r_threshold=0.3):
+                                   plot=True):
     """
-    Train a linear regression (temperature → load) on week 1 of each feeder,
-    forecast week 2 load from week 2 temperatures, and compare against actuals.
+    Three-week load forecast per feeder.
 
-    The two calendar weeks are identified automatically from the data; the
-    earlier week is used for training and the later for evaluation.
+    Week 1  — fit both a periodic (hour, is_weekend) profile and a
+              temperature regression (linear + quadratic).
+    Week 2  — validate both models; choose the winner by MAE.
+    Weeks 1+2 — retrain the winning model on the combined window.
+    Week 3  — held-out forecast / evaluation.
 
     Returns a dict keyed by feeder with:
-        slope, intercept, train_r          — week-1 model
-        mae, rmse, forecast_r              — week-2 forecast quality
-        week2                              — DataFrame of week-2 rows with
-                                             a "load_forecast" column added
+        forecast_method            — "periodic" or "temperature"
+        slope, intercept, train_r  — week-1 temperature model info
+        val_mae_periodic           — validation MAE of periodic model
+        val_mae_temperature        — validation MAE of best temperature model
+        mae, rmse, forecast_r      — week-3 forecast quality (linear / periodic)
+        mae_quad, rmse_quad, ...   — week-3 quadratic metrics
+        coef_quad                  — quadratic coefficients (or [])
+        week3                      — DataFrame of week-3 rows with forecast columns
     """
     load_df = load_df.copy()
     temp_df = temp_df.copy()
@@ -969,29 +974,31 @@ def forecast_load_from_temperature(load_df, temp_df,
 
     for feeder in feeders:
         fdf = merged[merged[feeder_col] == feeder].copy()
-        t_start = fdf[time_col].min()
-        t_split = t_start + pd.Timedelta(days=7)
-        if fdf[time_col].max() <= t_split:
-            print(f"  [{feeder}] less than 2 weeks of data — skipped")
+        t_start  = fdf[time_col].min()
+        t_split1 = t_start + pd.Timedelta(days=7)
+        t_split2 = t_start + pd.Timedelta(days=14)
+        if fdf[time_col].max() < t_split2:
+            print(f"  [{feeder}] less than 3 weeks of data — skipped")
             continue
-        train = fdf[fdf[time_col] < t_split].copy()
-        test  = fdf[fdf[time_col] >= t_split].copy()
-        w1 = f"{t_start.date()} – {(t_start + pd.Timedelta(days=6)).date()}"
-        w2 = f"{t_split.date()} – {fdf[time_col].max().date()}"
-        fdf["_week"] = fdf[time_col].dt.to_period("W")  # for scatter coloring only
+        train  = fdf[fdf[time_col] < t_split1].copy()
+        val    = fdf[(fdf[time_col] >= t_split1) & (fdf[time_col] < t_split2)].copy()
+        test   = fdf[fdf[time_col] >= t_split2].copy()
+        w1 = f"{t_start.date()} – {(t_split1 - pd.Timedelta(days=1)).date()}"
+        w2 = f"{t_split1.date()} – {(t_split2 - pd.Timedelta(days=1)).date()}"
+        w3 = f"{t_split2.date()} – {fdf[time_col].max().date()}"
+        fdf["_week"] = fdf[time_col].dt.to_period("W")  # for scatter coloring
 
-        if len(train) < 2 or test.empty:
-            print(f"  [{feeder}] insufficient data in one of the weeks — skipped")
+        if len(train) < 2 or len(val) < 2 or test.empty:
+            print(f"  [{feeder}] insufficient data in one of the windows — skipped")
             continue
 
-        # shared metric helper
         def _m(ya, yf):
             r = ya - yf
             with np.errstate(divide="ignore", invalid="ignore"):
                 return (float(np.mean(np.abs(r))), float(np.sqrt(np.mean(r ** 2))),
                         float(np.corrcoef(ya, yf)[0, 1]))
 
-        # measure temp-load correlation to decide forecast method
+        # ── step 1: fit both models on week 1 ───────────────────────────────
         x_train = train[temp_col].values
         y_train = train[load_col].values
         with np.errstate(divide="ignore", invalid="ignore"):
@@ -999,47 +1006,94 @@ def forecast_load_from_temperature(load_df, temp_df,
         if np.isnan(train_r):
             train_r = 0.0
 
-        # ── periodic branch ───────────────────────────────────────────────────
-        if abs(train_r) < periodic_r_threshold:
-            # build (hour, is_weekend) profile from week-1 load
-            _tr = train.copy()
-            _tr["_hour"] = _tr[time_col].dt.hour
-            _tr["_is_wknd"] = (_tr[time_col].dt.dayofweek >= 5)
-            profile = (_tr.groupby(["_hour", "_is_wknd"])[load_col]
-                       .mean().reset_index().rename(columns={load_col: "_fc"}))
-            hour_mean = _tr.groupby("_hour")[load_col].mean()
+        # periodic profile from week 1
+        _tr = train.copy()
+        _tr["_hour"] = _tr[time_col].dt.hour
+        _tr["_is_wknd"] = (_tr[time_col].dt.dayofweek >= 5)
+        profile_w1 = (_tr.groupby(["_hour", "_is_wknd"])[load_col]
+                      .mean().reset_index().rename(columns={load_col: "_fc"}))
+        hour_mean_w1 = _tr.groupby("_hour")[load_col].mean()
 
+        # temperature model from week 1
+        coef1_w1 = np.polyfit(x_train, y_train, 1)
+        coef2_w1 = np.polyfit(x_train, y_train, 2)
+
+        # ── step 2: validate on week 2 ──────────────────────────────────────
+        _val = val.copy()
+        _val["_hour"] = _val[time_col].dt.hour
+        _val["_is_wknd"] = (_val[time_col].dt.dayofweek >= 5)
+        _val = _val.merge(profile_w1, on=["_hour", "_is_wknd"], how="left")
+        miss = _val["_fc"].isna()
+        if miss.any():
+            _val.loc[miss, "_fc"] = _val.loc[miss, "_hour"].map(hour_mean_w1)
+        y_val_act  = val[load_col].values
+        y_val_per  = _val["_fc"].values
+        y_val_lin  = np.polyval(coef1_w1, val[temp_col].values)
+        y_val_quad = np.polyval(coef2_w1, val[temp_col].values)
+
+        val_mae_periodic    = float(np.mean(np.abs(y_val_act - y_val_per)))
+        val_mae_lin         = float(np.mean(np.abs(y_val_act - y_val_lin)))
+        val_mae_quad        = float(np.mean(np.abs(y_val_act - y_val_quad)))
+        val_mae_temperature = min(val_mae_lin, val_mae_quad)
+
+        if len(val) < 4:
+            use_periodic = abs(train_r) < 0.3
+            print(f"  [{feeder}] validation window too small — falling back to r-threshold heuristic")
+        else:
+            use_periodic = val_mae_periodic <= val_mae_temperature
+
+        # ── step 3: retrain winner on weeks 1+2 ─────────────────────────────
+        train12 = fdf[fdf[time_col] < t_split2].copy()
+
+        if use_periodic:
+            _tr12 = train12.copy()
+            _tr12["_hour"] = _tr12[time_col].dt.hour
+            _tr12["_is_wknd"] = (_tr12[time_col].dt.dayofweek >= 5)
+            profile_final = (_tr12.groupby(["_hour", "_is_wknd"])[load_col]
+                             .mean().reset_index().rename(columns={load_col: "_fc"}))
+            hour_mean_final = _tr12.groupby("_hour")[load_col].mean()
+        else:
+            x12 = train12[temp_col].values
+            y12 = train12[load_col].values
+            coef1_final = np.polyfit(x12, y12, 1)
+            coef2_final = np.polyfit(x12, y12, 2)
+            slope_final, intercept_final = float(coef1_final[0]), float(coef1_final[1])
+
+        # ── step 4: forecast week 3 ──────────────────────────────────────────
+        if use_periodic:
             _te = test.copy()
             _te["_hour"] = _te[time_col].dt.hour
             _te["_is_wknd"] = (_te[time_col].dt.dayofweek >= 5)
-            _te = _te.merge(profile, on=["_hour", "_is_wknd"], how="left")
+            _te = _te.merge(profile_final, on=["_hour", "_is_wknd"], how="left")
             miss = _te["_fc"].isna()
             if miss.any():
-                _te.loc[miss, "_fc"] = _te.loc[miss, "_hour"].map(hour_mean)
+                _te.loc[miss, "_fc"] = _te.loc[miss, "_hour"].map(hour_mean_final)
             _te["load_forecast"]      = _te["_fc"]
             _te["load_forecast_quad"] = _te["_fc"]
             _te.drop(columns=["_hour", "_is_wknd", "_fc"], inplace=True)
 
-            y_actual  = _te[load_col].values
-            y_fc_per  = _te["load_forecast"].values
-            mae, rmse, forecast_r = _m(y_actual, y_fc_per)
+            y_actual = _te[load_col].values
+            mae, rmse, forecast_r = _m(y_actual, _te["load_forecast"].values)
 
-            print(f"  [{feeder}]  week 1 ({w1})  temp-load r={train_r:.4f} → periodic forecast")
-            print(f"           week 2 ({w2})  MAE={mae:.4g}  RMSE={rmse:.4g}  r={forecast_r:.4f}")
+            print(f"  [{feeder}]  val: per_MAE={val_mae_periodic:.4g}  temp_MAE={val_mae_temperature:.4g}  → periodic")
+            print(f"           week 3 ({w3})  MAE={mae:.4g}  RMSE={rmse:.4g}  r={forecast_r:.4f}")
 
             results[feeder] = {
                 "forecast_method": "periodic",
                 "slope": float("nan"), "intercept": float("nan"), "train_r": train_r,
+                "val_mae_periodic": val_mae_periodic, "val_mae_temperature": val_mae_temperature,
                 "mae": mae, "rmse": rmse, "forecast_r": forecast_r,
                 "mae_quad": mae, "rmse_quad": rmse, "forecast_r_quad": forecast_r,
-                "coef_quad": [], "week2": _te,
+                "coef_quad": [], "week3": _te,
             }
 
             if not plot:
                 continue
 
             fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-            fig.suptitle(f"Feeder: {feeder}  [periodic  r(temp,load)={train_r:.3f}]", fontsize=12)
+            fig.suptitle(
+                f"Feeder: {feeder}  [periodic  val_per={val_mae_periodic:.4g}  val_temp={val_mae_temperature:.4g}]",
+                fontsize=12)
 
             hours = np.arange(24)
 
@@ -1061,27 +1115,25 @@ def forecast_load_from_temperature(load_df, temp_df,
                 ax_.legend(fontsize=8)
                 ax_.set_xticks(range(0, 24, 3))
 
-            _plot_profile(axes[0, 0], fdf, "Hourly load profile — all data")
+            _plot_profile(axes[0, 0], train12, f"Weeks 1+2 load profile (final)  ({w1} / {w2})")
 
-            # top-right: dual-axis time series (all data)
             ax2 = axes[0, 1]
-            ts_all = fdf.set_index(time_col)[[load_col, temp_col]].sort_index().resample("1h").mean()
-            ax2.plot(ts_all.index, ts_all[load_col], color="steelblue",
+            ts_12 = train12.set_index(time_col)[[load_col, temp_col]].sort_index().resample("1h").mean()
+            ax2.plot(ts_12.index, ts_12[load_col], color="steelblue",
                      linewidth=0.7, label=load_col, alpha=0.85)
             ax2.set_ylabel(load_col, color="steelblue")
             ax2.tick_params(axis="y", labelcolor="steelblue")
             ax_r2 = ax2.twinx()
-            ax_r2.plot(ts_all.index, ts_all[temp_col], color="darkorange",
+            ax_r2.plot(ts_12.index, ts_12[temp_col], color="darkorange",
                        linewidth=0.7, label=temp_col, alpha=0.85)
             ax_r2.set_ylabel(temp_col, color="darkorange")
             ax_r2.tick_params(axis="y", labelcolor="darkorange")
             lines2 = ax2.get_lines() + ax_r2.get_lines()
             ax2.legend(lines2, [l.get_label() for l in lines2], fontsize=8, loc="upper left")
-            ax2.set_title("Load & Temperature over Time")
+            ax2.set_title(f"Weeks 1+2 — Load & Temperature  ({w1} / {w2})")
 
-            _plot_profile(axes[1, 0], train, f"Week-1 profile used for forecast  ({w1})")
+            _plot_profile(axes[1, 0], train, f"Week-1 profile  ({w1})")
 
-            # bottom-right: forecast vs actual
             ax4 = axes[1, 1]
             _te_s = _te.set_index(time_col).sort_index().resample("1h").mean()
             ax4.plot(_te_s.index, _te_s[load_col], color="steelblue",
@@ -1097,48 +1149,46 @@ def forecast_load_from_temperature(load_df, temp_df,
             ax4r.tick_params(axis="y", labelcolor="seagreen")
             _lines4 = ax4.get_lines() + ax4r.get_lines()
             ax4.legend(_lines4, [l.get_label() for l in _lines4], fontsize=8)
-            ax4.set_title(f"Week 2 forecast vs actual  ({w2})")
+            ax4.set_title(f"Week 3 forecast vs actual  ({w3})")
 
             fig.autofmt_xdate()
             fig.tight_layout()
             plt.show()
             continue
 
-        # ── temperature-based branch ──────────────────────────────────────────
-        coef1 = np.polyfit(x_train, y_train, 1)
-        coef2 = np.polyfit(x_train, y_train, 2)
-        slope, intercept = float(coef1[0]), float(coef1[1])
-
-        # forecast week 2 with both models
+        # ── temperature-based branch ─────────────────────────────────────────
         x_test = test[temp_col].values
         y_actual = test[load_col].values
-        y_fc_lin  = np.polyval(coef1, x_test)
-        y_fc_quad = np.polyval(coef2, x_test)
+        y_fc_lin  = np.polyval(coef1_final, x_test)
+        y_fc_quad = np.polyval(coef2_final, x_test)
         test = test.copy()
         test["load_forecast"]      = y_fc_lin
         test["load_forecast_quad"] = y_fc_quad
 
+        slope, intercept = slope_final, intercept_final
         mae,  rmse,  forecast_r  = _m(y_actual, y_fc_lin)
         mae2, rmse2, forecast_r2 = _m(y_actual, y_fc_quad)
 
-        print(f"  [{feeder}]  week 1 ({w1})  r={train_r:.4f}  "
-              f"slope={slope:.4g}  intercept={intercept:.4g}")
-        print(f"           week 2 ({w2})  linear:    MAE={mae:.4g}  RMSE={rmse:.4g}  r={forecast_r:.4f}")
+        print(f"  [{feeder}]  val: per_MAE={val_mae_periodic:.4g}  temp_MAE={val_mae_temperature:.4g}  → temperature")
+        print(f"           week 3 ({w3})  linear:    MAE={mae:.4g}  RMSE={rmse:.4g}  r={forecast_r:.4f}")
         print(f"                          quadratic: MAE={mae2:.4g}  RMSE={rmse2:.4g}  r={forecast_r2:.4f}")
 
         results[feeder] = {
             "forecast_method": "temperature",
             "slope": slope, "intercept": intercept, "train_r": train_r,
+            "val_mae_periodic": val_mae_periodic, "val_mae_temperature": val_mae_temperature,
             "mae": mae, "rmse": rmse, "forecast_r": forecast_r,
             "mae_quad": mae2, "rmse_quad": rmse2, "forecast_r_quad": forecast_r2,
-            "coef_quad": coef2.tolist(), "week2": test,
+            "coef_quad": coef2_final.tolist(), "week3": test,
         }
 
         if not plot:
             continue
 
         fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-        fig.suptitle(f"Feeder: {feeder}", fontsize=12)
+        fig.suptitle(
+            f"Feeder: {feeder}  [val_per={val_mae_periodic:.4g}  val_temp={val_mae_temperature:.4g}]",
+            fontsize=12)
 
         all_x = fdf[temp_col].values
         all_y = fdf[load_col].values
@@ -1146,7 +1196,6 @@ def forecast_load_from_temperature(load_df, temp_df,
         overall_r    = float(np.corrcoef(all_x, all_y)[0, 1])
         xline_all    = np.linspace(all_x.min(), all_x.max(), 200)
 
-        # ── top-left: temp vs load scatter (all data) with per-week lines ──
         ax = axes[0, 0]
         ax.scatter(all_x, all_y, s=6, alpha=0.3, linewidths=0, color="steelblue")
         week_cmap = plt.get_cmap("tab20")
@@ -1167,38 +1216,35 @@ def forecast_load_from_temperature(load_df, temp_df,
         ax.set_title("Load vs Temperature (all data)")
         ax.legend(fontsize=6, loc="upper left")
 
-        # ── top-right: dual-axis time series (all data) ──────────────────────
         ax2 = axes[0, 1]
-        ts_all = fdf.set_index(time_col)[[load_col, temp_col]].sort_index().resample("1h").mean()
+        ts_12 = train12.set_index(time_col)[[load_col, temp_col]].sort_index().resample("1h").mean()
         color_load, color_temp = "steelblue", "darkorange"
-        ax2.plot(ts_all.index, ts_all[load_col], color=color_load,
+        ax2.plot(ts_12.index, ts_12[load_col], color=color_load,
                  linewidth=0.7, label=load_col, alpha=0.85)
         ax2.set_ylabel(load_col, color=color_load)
         ax2.tick_params(axis="y", labelcolor=color_load)
         ax_r2 = ax2.twinx()
-        ax_r2.plot(ts_all.index, ts_all[temp_col], color=color_temp,
+        ax_r2.plot(ts_12.index, ts_12[temp_col], color=color_temp,
                    linewidth=0.7, label=temp_col, alpha=0.85)
         ax_r2.set_ylabel(temp_col, color=color_temp)
         ax_r2.tick_params(axis="y", labelcolor=color_temp)
         lines2 = ax2.get_lines() + ax_r2.get_lines()
         ax2.legend(lines2, [l.get_label() for l in lines2], fontsize=8, loc="upper left")
-        ax2.set_title("Load & Temperature over Time")
+        ax2.set_title(f"Weeks 1+2 — Load & Temperature  ({w1} / {w2})")
 
-        # ── bottom-left: week 1 scatter + fit line ────────────────────────────
         ax3 = axes[1, 0]
         ax3.scatter(x_train, y_train, s=8, alpha=0.45, linewidths=0,
                     label=f"week 1 data  (r={train_r:.3f})")
         xline_w1 = np.linspace(x_train.min(), x_train.max(), 200)
-        ax3.plot(xline_w1, np.polyval(coef1, xline_w1), color="crimson",
-                 linewidth=1.5, label=f"linear  slope={slope:.3g}")
-        ax3.plot(xline_w1, np.polyval(coef2, xline_w1), color="darkorange",
+        ax3.plot(xline_w1, np.polyval(coef1_w1, xline_w1), color="crimson",
+                 linewidth=1.5, label=f"linear  slope={coef1_w1[0]:.3g}")
+        ax3.plot(xline_w1, np.polyval(coef2_w1, xline_w1), color="darkorange",
                  linewidth=1.5, linestyle="--", label="quadratic")
         ax3.set_xlabel(temp_col)
         ax3.set_ylabel(load_col)
-        ax3.set_title(f"Week 1 training fit  ({w1})")
+        ax3.set_title(f"Week 1 initial fit  ({w1})")
         ax3.legend(fontsize=8)
 
-        # ── bottom-right: week 2 actual vs forecast ───────────────────────────
         ax4 = axes[1, 1]
         test_sorted = test.set_index(time_col).sort_index().resample("1h").mean()
         ax4.plot(test_sorted.index, test_sorted[load_col], color="steelblue",
@@ -1217,7 +1263,7 @@ def forecast_load_from_temperature(load_df, temp_df,
         ax4r.tick_params(axis="y", labelcolor="seagreen")
         _lines4 = ax4.get_lines() + ax4r.get_lines()
         ax4.legend(_lines4, [l.get_label() for l in _lines4], fontsize=8)
-        ax4.set_title(f"Week 2 forecast vs actual  ({w2})")
+        ax4.set_title(f"Week 3 forecast vs actual  ({w3})")
 
         fig.autofmt_xdate()
         fig.tight_layout()
@@ -1394,27 +1440,25 @@ def forecast_load_with_offset(load_df, temp_df,
                               time_col="timestamp",
                               poi_col="poi_id",
                               feeder_col="feeder",
-                              plot=True,
-                              periodic_r_threshold=0.3):
+                              plot=True):
     """
-    Offset-aware two-week load forecast per feeder.
+    Offset-aware three-week load forecast per feeder.
 
-    1. Compute the median daily peak offset for week 1
-           offset = median(peak_load_hour - peak_temp_hour)
-    2. Shift week-1 load timestamps by -offset hours so load and temperature
-       peaks are aligned, then fit a linear regression (temp → shifted load).
-    3. Apply the model to week-2 temperatures.  The resulting forecast is in
-       "shifted time", so shift forecast timestamps forward by +offset hours
-       to put them back in original time coordinates.
-    4. Merge the re-shifted forecast with actual week-2 load on timestamp and
-       compute MAE, RMSE, and Pearson r.
+    Week 1  — fit periodic profile + temperature model (with peak-offset shift).
+    Week 2  — validate both models; choose winner by MAE.
+    Weeks 1+2 — retrain winner on combined window.
+    Week 3  — held-out forecast / evaluation.
 
     Returns a dict keyed by feeder containing:
-        offset_h            — median peak offset used
-        slope, intercept    — week-1 model (fitted on shifted data)
-        train_r             — Pearson r of fit on shifted week-1 data
-        mae, rmse, forecast_r — week-2 evaluation metrics
-        week2               — DataFrame with actual load and load_forecast
+        forecast_method              — "periodic" or "temperature"
+        offset_h                     — median peak offset used (0 for periodic)
+        slope, intercept, train_r    — week-1 temperature model info
+        val_mae_periodic             — validation MAE of periodic model
+        val_mae_temperature          — validation MAE of best temperature model
+        mae, rmse, forecast_r        — week-3 metrics (linear / periodic)
+        mae_quad, rmse_quad, ...     — week-3 quadratic metrics
+        coef_quad                    — quadratic coefficients (or [])
+        week3                        — DataFrame with actual load and forecast columns
     """
     load_df = load_df.copy()
     temp_df = temp_df.copy()
@@ -1442,110 +1486,282 @@ def forecast_load_with_offset(load_df, temp_df,
 
     for feeder in feeders:
         fdf = merged[merged[feeder_col] == feeder].copy()
-        t_start = fdf[time_col].min()
-        t_split = t_start + pd.Timedelta(days=7)
-        if fdf[time_col].max() <= t_split:
-            print(f"  [{feeder}] less than 2 weeks of data — skipped")
-            continue
-        train_orig = fdf[fdf[time_col] < t_split].copy()
-        test_orig  = fdf[fdf[time_col] >= t_split].copy()
-        w1 = f"{t_start.date()} – {(t_start + pd.Timedelta(days=6)).date()}"
-        w2 = f"{t_split.date()} – {fdf[time_col].max().date()}"
-
-        if len(train_orig) < 2 or test_orig.empty:
-            print(f"  [{feeder}] insufficient data in one of the weeks — skipped")
+        t_start  = fdf[time_col].min()
+        t_split1 = t_start + pd.Timedelta(days=7)
+        t_split2 = t_start + pd.Timedelta(days=14)
+        if fdf[time_col].max() < t_split2:
+            print(f"  [{feeder}] less than 3 weeks of data — skipped")
             continue
 
-        # shared metric helper
+        train_orig = fdf[fdf[time_col] < t_split1].copy()
+        val_orig   = fdf[(fdf[time_col] >= t_split1) & (fdf[time_col] < t_split2)].copy()
+        test_orig  = fdf[fdf[time_col] >= t_split2].copy()
+        w1 = f"{t_start.date()} – {(t_split1 - pd.Timedelta(days=1)).date()}"
+        w2 = f"{t_split1.date()} – {(t_split2 - pd.Timedelta(days=1)).date()}"
+        w3 = f"{t_split2.date()} – {fdf[time_col].max().date()}"
+
+        if len(train_orig) < 2 or len(val_orig) < 2 or test_orig.empty:
+            print(f"  [{feeder}] insufficient data in one of the windows — skipped")
+            continue
+
         def _m(ya, yf):
             r = ya - yf
             with np.errstate(divide="ignore", invalid="ignore"):
                 return (float(np.mean(np.abs(r))), float(np.sqrt(np.mean(r ** 2))),
                         float(np.corrcoef(ya, yf)[0, 1]))
 
-        # measure temp-load correlation on week-1 merged data to decide method
-        with np.errstate(divide="ignore", invalid="ignore"):
-            _x = train_orig[temp_col].values
-            _y = train_orig[load_col].values
-            train_r_check = float(np.corrcoef(_x, _y)[0, 1]) if len(_x) >= 2 else 0.0
-        if np.isnan(train_r_check):
-            train_r_check = 0.0
-
         import matplotlib.gridspec as gridspec
         import matplotlib.dates as mdates
 
-        # ── periodic branch ───────────────────────────────────────────────────
-        if abs(train_r_check) < periodic_r_threshold:
-            train_r = train_r_check
+        # ── step 1: fit both models on week 1 ───────────────────────────────
 
-            # build profile from raw week-1 load (no temp join needed)
-            fload_w1p = load_df[
+        # periodic profile from raw week-1 load
+        fload_w1p = load_df[
+            (load_df[feeder_col] == feeder) &
+            (load_df[time_col] >= t_start) &
+            (load_df[time_col] < t_split1)
+        ].copy()
+        fload_w1p[load_col] = fload_w1p[load_col].astype(float)
+        fload_w1p["_hour"]    = fload_w1p[time_col].dt.hour
+        fload_w1p["_is_wknd"] = (fload_w1p[time_col].dt.dayofweek >= 5)
+        profile_w1 = (fload_w1p.groupby(["_hour", "_is_wknd"])[load_col]
+                      .mean().reset_index().rename(columns={load_col: "_fc"}))
+        hour_mean_w1 = fload_w1p.groupby("_hour")[load_col].mean()
+
+        # raw correlation for fallback heuristic
+        with np.errstate(divide="ignore", invalid="ignore"):
+            train_r_check = float(np.corrcoef(train_orig[temp_col].values,
+                                              train_orig[load_col].values)[0, 1]) \
+                            if len(train_orig) >= 2 else 0.0
+        if np.isnan(train_r_check):
+            train_r_check = 0.0
+
+        # compute offset from week-1 merged data
+        _tr1 = train_orig.copy()
+        _tr1["_date"] = _tr1[time_col].dt.date
+        _tr1["_hour"] = _tr1[time_col].dt.hour
+        day_offsets = []
+        for _, day in _tr1.groupby("_date"):
+            if day.empty:
+                continue
+            pl = int(day.loc[day[load_col].idxmax(), "_hour"])
+            pt = int(day.loc[day[temp_col].idxmax(), "_hour"])
+            day_offsets.append(pl - pt)
+        if not day_offsets:
+            print(f"  [{feeder}] could not compute peak offset — skipped")
+            continue
+        offset_h_w1 = int(round(float(np.median(day_offsets))))
+
+        # shift week-1 load, re-merge with temp, fit temperature model
+        fload_w1 = load_df[
+            (load_df[feeder_col] == feeder) &
+            (load_df[time_col] >= t_start) &
+            (load_df[time_col] < t_split1)
+        ].copy()
+        fload_w1_shifted = fload_w1.copy()
+        fload_w1_shifted[time_col] = fload_w1_shifted[time_col] - pd.Timedelta(hours=offset_h_w1)
+        train_shifted = pd.merge(fload_w1_shifted, temp_df, on=[time_col, poi_col],
+                                 how="inner", suffixes=("_load", "_temp"))
+        train_shifted[load_col] = train_shifted[load_col].astype(float)
+        train_shifted[temp_col] = train_shifted[temp_col].astype(float)
+        train_shifted = train_shifted[train_shifted[load_col].notna() & train_shifted[temp_col].notna()]
+        if len(train_shifted) < 2:
+            print(f"  [{feeder}] insufficient overlap after shifting week-1 — skipped")
+            continue
+
+        train_agg1 = (train_shifted
+                      .set_index(time_col)[[load_col, temp_col]]
+                      .resample("1h").mean().dropna().reset_index())
+        x_train1 = train_agg1[temp_col].values
+        y_train1 = train_agg1[load_col].values
+        coef1_w1 = np.polyfit(x_train1, y_train1, 1)
+        coef2_w1 = np.polyfit(x_train1, y_train1, 2)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            train_r = float(np.corrcoef(x_train1, y_train1)[0, 1])
+        if np.isnan(train_r):
+            train_r = 0.0
+
+        # ── step 2: validate on week 2 ──────────────────────────────────────
+
+        # periodic validation
+        fload_w2v = load_df[
+            (load_df[feeder_col] == feeder) &
+            (load_df[time_col] >= t_split1) &
+            (load_df[time_col] < t_split2)
+        ].copy()
+        fload_w2v[load_col] = fload_w2v[load_col].astype(float)
+        fload_w2v["_hour"]    = fload_w2v[time_col].dt.hour
+        fload_w2v["_is_wknd"] = (fload_w2v[time_col].dt.dayofweek >= 5)
+        fload_w2v = fload_w2v.merge(profile_w1, on=["_hour", "_is_wknd"], how="left")
+        miss = fload_w2v["_fc"].isna()
+        if miss.any():
+            fload_w2v.loc[miss, "_fc"] = fload_w2v.loc[miss, "_hour"].map(hour_mean_w1)
+        fload_w2v["_fc_per"] = fload_w2v["_fc"]
+        fload_w2v.drop(columns=["_hour", "_is_wknd", "_fc"], inplace=True)
+        val_per = (fload_w2v.set_index(time_col)[[load_col, "_fc_per"]]
+                   .resample("1h").mean().dropna().reset_index())
+
+        # temperature validation using week-1 coefs + offset
+        ftemp_w2v = temp_df[
+            (temp_df[time_col] >= t_split1) & (temp_df[time_col] < t_split2)
+        ].copy()
+        ftemp_w2v[temp_col] = ftemp_w2v[temp_col].astype(float)
+        ftemp_w2v["_fc_lin"]  = np.polyval(coef1_w1, ftemp_w2v[temp_col].values)
+        ftemp_w2v["_fc_quad"] = np.polyval(coef2_w1, ftemp_w2v[temp_col].values)
+        ftemp_w2v[time_col] = ftemp_w2v[time_col] + pd.Timedelta(hours=offset_h_w1)
+
+        fload_w2a = load_df[
+            (load_df[feeder_col] == feeder) &
+            (load_df[time_col] >= t_split1) &
+            (load_df[time_col] < t_split2)
+        ].copy()
+        fload_w2a[load_col] = fload_w2a[load_col].astype(float)
+        val_temp_raw = pd.merge(
+            fload_w2a[[time_col, feeder_col, load_col]],
+            ftemp_w2v[[time_col, "_fc_lin", "_fc_quad"]],
+            on=time_col, how="inner"
+        ).dropna(subset=[load_col, "_fc_lin"])
+        val_temp = (val_temp_raw
+                    .set_index(time_col)[[load_col, "_fc_lin", "_fc_quad"]]
+                    .resample("1h").mean().dropna().reset_index())
+
+        if val_per.empty or val_temp.empty:
+            use_periodic = abs(train_r_check) < 0.3
+            val_mae_periodic    = float("nan")
+            val_mae_temperature = float("nan")
+            print(f"  [{feeder}] validation data missing — falling back to r-threshold heuristic")
+        else:
+            val_mae_periodic = float(np.mean(np.abs(
+                val_per[load_col].values - val_per["_fc_per"].values)))
+            val_mae_lin  = float(np.mean(np.abs(
+                val_temp[load_col].values - val_temp["_fc_lin"].values)))
+            val_mae_quad = float(np.mean(np.abs(
+                val_temp[load_col].values - val_temp["_fc_quad"].values)))
+            val_mae_temperature = min(val_mae_lin, val_mae_quad)
+            if len(val_per) < 4:
+                use_periodic = abs(train_r_check) < 0.3
+                print(f"  [{feeder}] validation window too small — falling back to r-threshold heuristic")
+            else:
+                use_periodic = val_mae_periodic <= val_mae_temperature
+
+        # ── step 3: retrain winner on weeks 1+2 ─────────────────────────────
+        if use_periodic:
+            fload_w12p = load_df[
                 (load_df[feeder_col] == feeder) &
                 (load_df[time_col] >= t_start) &
-                (load_df[time_col] < t_split)
+                (load_df[time_col] < t_split2)
             ].copy()
-            fload_w1p[load_col] = fload_w1p[load_col].astype(float)
-            fload_w1p["_hour"]   = fload_w1p[time_col].dt.hour
-            fload_w1p["_is_wknd"] = (fload_w1p[time_col].dt.dayofweek >= 5)
-            profile = (fload_w1p.groupby(["_hour", "_is_wknd"])[load_col]
-                       .mean().reset_index().rename(columns={load_col: "_fc"}))
-            hour_mean = fload_w1p.groupby("_hour")[load_col].mean()
+            fload_w12p[load_col] = fload_w12p[load_col].astype(float)
+            fload_w12p["_hour"]    = fload_w12p[time_col].dt.hour
+            fload_w12p["_is_wknd"] = (fload_w12p[time_col].dt.dayofweek >= 5)
+            profile_final = (fload_w12p.groupby(["_hour", "_is_wknd"])[load_col]
+                             .mean().reset_index().rename(columns={load_col: "_fc"}))
+            hour_mean_final = fload_w12p.groupby("_hour")[load_col].mean()
+            offset_h = 0
+        else:
+            # recompute offset from weeks 1+2 merged data
+            train12_orig = fdf[fdf[time_col] < t_split2].copy()
+            train12_orig["_date"] = train12_orig[time_col].dt.date
+            train12_orig["_hour"] = train12_orig[time_col].dt.hour
+            day_offsets12 = []
+            for _, day in train12_orig.groupby("_date"):
+                if day.empty:
+                    continue
+                pl = int(day.loc[day[load_col].idxmax(), "_hour"])
+                pt = int(day.loc[day[temp_col].idxmax(), "_hour"])
+                day_offsets12.append(pl - pt)
+            offset_h = int(round(float(np.median(day_offsets12)))) if day_offsets12 else offset_h_w1
 
-            fload_w2p = load_df[
+            fload_w12 = load_df[
                 (load_df[feeder_col] == feeder) &
-                (load_df[time_col] >= t_split)
+                (load_df[time_col] >= t_start) &
+                (load_df[time_col] < t_split2)
             ].copy()
-            fload_w2p[load_col] = fload_w2p[load_col].astype(float)
-            fload_w2p["_hour"]   = fload_w2p[time_col].dt.hour
-            fload_w2p["_is_wknd"] = (fload_w2p[time_col].dt.dayofweek >= 5)
-            fload_w2p = fload_w2p.merge(profile, on=["_hour", "_is_wknd"], how="left")
-            miss = fload_w2p["_fc"].isna()
-            if miss.any():
-                fload_w2p.loc[miss, "_fc"] = fload_w2p.loc[miss, "_hour"].map(hour_mean)
-            fload_w2p["load_forecast"]      = fload_w2p["_fc"]
-            fload_w2p["load_forecast_quad"] = fload_w2p["_fc"]
-            fload_w2p.drop(columns=["_hour", "_is_wknd", "_fc"], inplace=True)
-
-            week2 = (fload_w2p.set_index(time_col)[[load_col, "load_forecast", "load_forecast_quad"]]
-                     .resample("1h").mean()
-                     .dropna()
-                     .reset_index())
-
-            if week2.empty:
-                print(f"  [{feeder}] no week-2 load data — skipped")
+            fload_w12_shifted = fload_w12.copy()
+            fload_w12_shifted[time_col] = fload_w12_shifted[time_col] - pd.Timedelta(hours=offset_h)
+            train12_shifted = pd.merge(fload_w12_shifted, temp_df, on=[time_col, poi_col],
+                                       how="inner", suffixes=("_load", "_temp"))
+            train12_shifted[load_col] = train12_shifted[load_col].astype(float)
+            train12_shifted[temp_col] = train12_shifted[temp_col].astype(float)
+            train12_shifted = train12_shifted[
+                train12_shifted[load_col].notna() & train12_shifted[temp_col].notna()]
+            if len(train12_shifted) < 2:
+                print(f"  [{feeder}] insufficient overlap after shifting weeks 1+2 — skipped")
                 continue
 
-            y_actual = week2[load_col].values
-            y_fc_per = week2["load_forecast"].values
-            mae, rmse, forecast_r = _m(y_actual, y_fc_per)
+            train_agg12 = (train12_shifted
+                           .set_index(time_col)[[load_col, temp_col]]
+                           .resample("1h").mean().dropna().reset_index())
+            x12 = train_agg12[temp_col].values
+            y12 = train_agg12[load_col].values
+            coef1_final = np.polyfit(x12, y12, 1)
+            coef2_final = np.polyfit(x12, y12, 2)
+            slope_final, intercept_final = float(coef1_final[0]), float(coef1_final[1])
+            with np.errstate(divide="ignore", invalid="ignore"):
+                train12_r = float(np.corrcoef(x12, y12)[0, 1])
 
-            print(f"  [{feeder}]  week 1 ({w1})  temp-load r={train_r:.4f} → periodic forecast")
-            print(f"           week 2 ({w2})  MAE={mae:.4g}  RMSE={rmse:.4g}  r={forecast_r:.4f}")
+        # ── step 4: forecast week 3 ──────────────────────────────────────────
+        if use_periodic:
+            fload_w3p = load_df[
+                (load_df[feeder_col] == feeder) &
+                (load_df[time_col] >= t_split2)
+            ].copy()
+            fload_w3p[load_col] = fload_w3p[load_col].astype(float)
+            fload_w3p["_hour"]    = fload_w3p[time_col].dt.hour
+            fload_w3p["_is_wknd"] = (fload_w3p[time_col].dt.dayofweek >= 5)
+            fload_w3p = fload_w3p.merge(profile_final, on=["_hour", "_is_wknd"], how="left")
+            miss = fload_w3p["_fc"].isna()
+            if miss.any():
+                fload_w3p.loc[miss, "_fc"] = fload_w3p.loc[miss, "_hour"].map(hour_mean_final)
+            fload_w3p["load_forecast"]      = fload_w3p["_fc"]
+            fload_w3p["load_forecast_quad"] = fload_w3p["_fc"]
+            fload_w3p.drop(columns=["_hour", "_is_wknd", "_fc"], inplace=True)
+            week3 = (fload_w3p.set_index(time_col)[[load_col, "load_forecast", "load_forecast_quad"]]
+                     .resample("1h").mean().dropna().reset_index())
+
+            if week3.empty:
+                print(f"  [{feeder}] no week-3 load data — skipped")
+                continue
+
+            y_actual = week3[load_col].values
+            mae, rmse, forecast_r = _m(y_actual, week3["load_forecast"].values)
+
+            print(f"  [{feeder}]  val: per_MAE={val_mae_periodic:.4g}  temp_MAE={val_mae_temperature:.4g}  → periodic")
+            print(f"           week 3 ({w3})  MAE={mae:.4g}  RMSE={rmse:.4g}  r={forecast_r:.4f}")
 
             results[feeder] = {
                 "forecast_method": "periodic",
                 "offset_h": 0, "slope": float("nan"), "intercept": float("nan"),
-                "train_r": train_r, "mae": mae, "rmse": rmse, "forecast_r": forecast_r,
+                "train_r": train_r, "val_mae_periodic": val_mae_periodic,
+                "val_mae_temperature": val_mae_temperature,
+                "mae": mae, "rmse": rmse, "forecast_r": forecast_r,
                 "mae_quad": mae, "rmse_quad": rmse, "forecast_r_quad": forecast_r,
-                "coef_quad": [], "week2": week2,
+                "coef_quad": [], "week3": week3,
             }
 
             if not plot:
                 continue
 
             fig = plt.figure(figsize=(14, 10))
-            fig.suptitle(f"Feeder: {feeder}  [periodic  r(temp,load)={train_r:.3f}]", fontsize=12)
+            fig.suptitle(
+                f"Feeder: {feeder}  [periodic  val_per={val_mae_periodic:.4g}  val_temp={val_mae_temperature:.4g}]",
+                fontsize=12)
             gs = gridspec.GridSpec(2, 2, figure=fig, hspace=0.45, wspace=0.35)
             ax_prof = fig.add_subplot(gs[0, 0])
-            ax_ts1  = fig.add_subplot(gs[0, 1])
+            ax_ts12 = fig.add_subplot(gs[0, 1])
             ax_fc   = fig.add_subplot(gs[1, :])
 
-            # top-left: week-1 hourly profile (weekday vs weekend)
+            # top-left: weeks 1+2 hourly profile
+            fload_w12p_plot = load_df[
+                (load_df[feeder_col] == feeder) &
+                (load_df[time_col] >= t_start) &
+                (load_df[time_col] < t_split2)
+            ].copy()
             hours = np.arange(24)
             for is_wknd, lbl, clr in [(False, "weekday", "steelblue"),
                                       (True,  "weekend", "darkorange")]:
-                sub = fload_w1p[fload_w1p[time_col].dt.dayofweek >= 5
-                                if is_wknd else fload_w1p[time_col].dt.dayofweek < 5]
+                sub = fload_w12p_plot[fload_w12p_plot[time_col].dt.dayofweek >= 5
+                                      if is_wknd else fload_w12p_plot[time_col].dt.dayofweek < 5]
                 if sub.empty:
                     continue
                 sub = sub.copy()
@@ -1555,31 +1771,35 @@ def forecast_load_with_offset(load_df, temp_df,
                              "o-", color=clr, linewidth=1.4, markersize=4, label=lbl)
             ax_prof.set_xlabel("hour of day")
             ax_prof.set_ylabel(load_col)
-            ax_prof.set_title(f"Week-1 hourly load profile  ({w1})")
+            ax_prof.set_title(f"Weeks 1+2 hourly load profile  ({w1} / {w2})")
             ax_prof.legend(fontsize=8)
             ax_prof.set_xticks(range(0, 24, 3))
 
-            # top-right: week-1 load time series only
-            ts_load_w1 = (fload_w1p.set_index(time_col)[load_col]
-                          .groupby(level=0).mean()
-                          .resample("1h").mean())
-            ax_ts1.plot(ts_load_w1.index, ts_load_w1.values, color="steelblue",
-                        linewidth=0.7, label=load_col, alpha=0.85)
-            ax_ts1.set_ylabel(load_col)
-            ax_ts1.set_title(f"Week 1 — Load  ({w1})")
-            ax_ts1.legend(fontsize=8)
-            ax_ts1.xaxis.set_major_formatter(mdates.DateFormatter("%m/%d"))
-            plt.setp(ax_ts1.get_xticklabels(), rotation=30, ha="right")
+            # top-right: weeks 1+2 load time series
+            _load_w12 = load_df[
+                (load_df[feeder_col] == feeder) &
+                (load_df[time_col] >= t_start) &
+                (load_df[time_col] < t_split2)
+            ].copy()
+            ts_load_12 = (_load_w12.set_index(time_col)[load_col]
+                          .groupby(level=0).mean().resample("1h").mean())
+            ax_ts12.plot(ts_load_12.index, ts_load_12.values, color="steelblue",
+                         linewidth=0.7, label=load_col, alpha=0.85)
+            ax_ts12.set_ylabel(load_col)
+            ax_ts12.set_title(f"Weeks 1+2 — Load  ({w1} / {w2})")
+            ax_ts12.legend(fontsize=8)
+            ax_ts12.xaxis.set_major_formatter(mdates.DateFormatter("%m/%d"))
+            plt.setp(ax_ts12.get_xticklabels(), rotation=30, ha="right")
 
-            # bottom: week-2 actual vs periodic forecast
-            w2s = (week2.set_index(time_col)[[load_col, "load_forecast"]]
+            # bottom: week-3 actual vs periodic forecast
+            w3s = (week3.set_index(time_col)[[load_col, "load_forecast"]]
                    .resample("1h").mean())
-            _ts_temp_fc = (temp_df[temp_df[time_col] >= t_split]
+            _ts_temp_fc = (temp_df[temp_df[time_col] >= t_split2]
                            .set_index(time_col)[temp_col].astype(float)
                            .groupby(level=0).mean().resample("1h").mean())
-            ax_fc.plot(w2s.index, w2s[load_col], color="steelblue", linewidth=0.9,
+            ax_fc.plot(w3s.index, w3s[load_col], color="steelblue", linewidth=0.9,
                        label="actual", alpha=0.9)
-            ax_fc.plot(w2s.index, w2s["load_forecast"], color="crimson", linewidth=0.9,
+            ax_fc.plot(w3s.index, w3s["load_forecast"], color="crimson", linewidth=0.9,
                        linestyle="--",
                        label=f"periodic  MAE={mae:.4g}  r={forecast_r:.3f}", alpha=0.9)
             ax_fc.set_ylabel(load_col)
@@ -1590,7 +1810,7 @@ def forecast_load_with_offset(load_df, temp_df,
             ax_fcr.tick_params(axis="y", labelcolor="seagreen")
             _lines_fc = ax_fc.get_lines() + ax_fcr.get_lines()
             ax_fc.legend(_lines_fc, [l.get_label() for l in _lines_fc], fontsize=8)
-            ax_fc.set_title(f"Week 2 — forecast vs actual  ({w2})")
+            ax_fc.set_title(f"Week 3 — forecast vs actual  ({w3})")
             ax_fc.xaxis.set_major_formatter(mdates.DateFormatter("%m/%d %H:%M"))
             plt.setp(ax_fc.get_xticklabels(), rotation=30, ha="right")
 
@@ -1598,190 +1818,121 @@ def forecast_load_with_offset(load_df, temp_df,
             plt.show()
             continue
 
-        # ── temperature-based branch ──────────────────────────────────────────
-        # ── step 1: compute median peak offset on week 1 ─────────────────────
-        train_orig["_date"] = train_orig[time_col].dt.date
-        train_orig["_hour"] = train_orig[time_col].dt.hour
-        day_offsets = []
-        for _, day in train_orig.groupby("_date"):
-            if day.empty:
-                continue
-            pl = int(day.loc[day[load_col].idxmax(), "_hour"])
-            pt = int(day.loc[day[temp_col].idxmax(), "_hour"])
-            day_offsets.append(pl - pt)
-        if not day_offsets:
-            print(f"  [{feeder}] could not compute peak offset — skipped")
-            continue
-        offset_h = int(round(float(np.median(day_offsets))))
+        # ── temperature branch: forecast week 3 ─────────────────────────────
+        ftemp_w3 = temp_df[temp_df[time_col] >= t_split2].copy()
+        ftemp_w3[temp_col] = ftemp_w3[temp_col].astype(float)
+        ftemp_w3["load_forecast"]      = np.polyval(coef1_final, ftemp_w3[temp_col].values)
+        ftemp_w3["load_forecast_quad"] = np.polyval(coef2_final, ftemp_w3[temp_col].values)
+        ftemp_w3[time_col] = ftemp_w3[time_col] + pd.Timedelta(hours=offset_h)
 
-        # ── step 2: shift week-1 load back, re-merge, fit model ──────────────
-        fload_w1 = load_df[
+        fload_w3 = load_df[
             (load_df[feeder_col] == feeder) &
-            (load_df[time_col] >= t_start) &
-            (load_df[time_col] < t_split)
+            (load_df[time_col] >= t_split2)
         ].copy()
-        fload_w1_shifted = fload_w1.copy()
-        fload_w1_shifted[time_col] = fload_w1_shifted[time_col] - pd.Timedelta(hours=offset_h)
+        fload_w3[load_col] = fload_w3[load_col].astype(float)
 
-        train_shifted = pd.merge(fload_w1_shifted, temp_df, on=[time_col, poi_col],
-                                 how="inner", suffixes=("_load", "_temp"))
-        train_shifted[load_col] = train_shifted[load_col].astype(float)
-        train_shifted[temp_col] = train_shifted[temp_col].astype(float)
-        train_shifted = train_shifted[
-            train_shifted[load_col].notna() & train_shifted[temp_col].notna()
-        ]
-
-        if len(train_shifted) < 2:
-            print(f"  [{feeder}] insufficient overlap after shifting week-1 — skipped")
-            continue
-
-        # aggregate to one value per hour so the scatter has clean unique points
-        train_agg = (train_shifted
-                     .set_index(time_col)[[load_col, temp_col]]
-                     .resample("1h").mean()
-                     .dropna()
-                     .reset_index())
-
-        x_train = train_agg[temp_col].values
-        y_train = train_agg[load_col].values
-        coef1 = np.polyfit(x_train, y_train, 1)
-        coef2 = np.polyfit(x_train, y_train, 2)
-        slope, intercept = float(coef1[0]), float(coef1[1])
-        train_r = float(np.corrcoef(x_train, y_train)[0, 1])
-
-        # ── step 3: forecast week 2, re-shift timestamps forward ─────────────
-        ftemp_w2 = temp_df[
-            temp_df[time_col] >= t_split
-        ].copy()
-        ftemp_w2[temp_col] = ftemp_w2[temp_col].astype(float)
-
-        # forecast is in shifted time; move timestamps +offset_h to restore
-        ftemp_w2["load_forecast"]      = np.polyval(coef1, ftemp_w2[temp_col].values)
-        ftemp_w2["load_forecast_quad"] = np.polyval(coef2, ftemp_w2[temp_col].values)
-        ftemp_w2[time_col] = ftemp_w2[time_col] + pd.Timedelta(hours=offset_h)
-
-        # ── step 4: merge forecast with actual week-2 load, compute metrics ──
-        fload_w2 = load_df[
-            (load_df[feeder_col] == feeder) &
-            (load_df[time_col] >= t_split)
-        ].copy()
-        fload_w2[load_col] = fload_w2[load_col].astype(float)
-
-        week2_raw = pd.merge(
-            fload_w2[[time_col, feeder_col, load_col]],
-            ftemp_w2[[time_col, "load_forecast", "load_forecast_quad"]],
+        week3_raw = pd.merge(
+            fload_w3[[time_col, feeder_col, load_col]],
+            ftemp_w3[[time_col, "load_forecast", "load_forecast_quad"]],
             on=time_col, how="inner"
         ).dropna(subset=[load_col, "load_forecast", "load_forecast_quad"])
 
-        if week2_raw.empty:
-            print(f"  [{feeder}] no overlapping records for week-2 comparison — skipped")
+        if week3_raw.empty:
+            print(f"  [{feeder}] no overlapping records for week-3 comparison — skipped")
             continue
 
-        # aggregate to hourly mean to eliminate duplicates from multiple poi_ids
-        week2 = (week2_raw
+        week3 = (week3_raw
                  .set_index(time_col)[[load_col, "load_forecast", "load_forecast_quad"]]
-                 .resample("1h").mean()
-                 .dropna()
-                 .reset_index())
+                 .resample("1h").mean().dropna().reset_index())
 
-        y_actual  = week2[load_col].values
-        y_fc_lin  = week2["load_forecast"].values
-        y_fc_quad = week2["load_forecast_quad"].values
-        res_lin   = y_actual - y_fc_lin
-        res_quad  = y_actual - y_fc_quad
-        mae       = float(np.mean(np.abs(res_lin)))
-        rmse      = float(np.sqrt(np.mean(res_lin ** 2)))
-        mae2      = float(np.mean(np.abs(res_quad)))
-        rmse2     = float(np.sqrt(np.mean(res_quad ** 2)))
-        with np.errstate(divide="ignore", invalid="ignore"):
-            forecast_r  = float(np.corrcoef(y_actual, y_fc_lin)[0, 1])
-            forecast_r2 = float(np.corrcoef(y_actual, y_fc_quad)[0, 1])
+        y_actual  = week3[load_col].values
+        y_fc_lin  = week3["load_forecast"].values
+        y_fc_quad = week3["load_forecast_quad"].values
+        mae,  rmse,  forecast_r  = _m(y_actual, y_fc_lin)
+        mae2, rmse2, forecast_r2 = _m(y_actual, y_fc_quad)
+        slope, intercept = slope_final, intercept_final
 
-        print(f"  [{feeder}]  offset={offset_h:+d}h  "
-              f"week-1 r={train_r:.4f}  slope={slope:.4g}")
-        print(f"           week-2  linear:    MAE={mae:.4g}  RMSE={rmse:.4g}  r={forecast_r:.4f}")
+        print(f"  [{feeder}]  val: per_MAE={val_mae_periodic:.4g}  temp_MAE={val_mae_temperature:.4g}  → temperature")
+        print(f"           offset={offset_h:+d}h  train12_r={train12_r:.4f}  slope={slope:.4g}")
+        print(f"           week-3  linear:    MAE={mae:.4g}  RMSE={rmse:.4g}  r={forecast_r:.4f}")
         print(f"                   quadratic: MAE={mae2:.4g}  RMSE={rmse2:.4g}  r={forecast_r2:.4f}")
 
         results[feeder] = {
             "forecast_method": "temperature",
             "offset_h": offset_h, "slope": slope, "intercept": intercept,
-            "train_r": train_r, "mae": mae, "rmse": rmse, "forecast_r": forecast_r,
+            "train_r": train_r, "val_mae_periodic": val_mae_periodic,
+            "val_mae_temperature": val_mae_temperature,
+            "mae": mae, "rmse": rmse, "forecast_r": forecast_r,
             "mae_quad": mae2, "rmse_quad": rmse2, "forecast_r_quad": forecast_r2,
-            "coef_quad": coef2.tolist(), "week2": week2,
+            "coef_quad": coef2_final.tolist(), "week3": week3,
         }
 
         if not plot:
             continue
 
         fig = plt.figure(figsize=(14, 10))
-        fig.suptitle(f"Feeder: {feeder}  (offset={offset_h:+d}h)", fontsize=12)
+        fig.suptitle(
+            f"Feeder: {feeder}  (offset={offset_h:+d}h  val_per={val_mae_periodic:.4g}  val_temp={val_mae_temperature:.4g})",
+            fontsize=12)
         gs = gridspec.GridSpec(2, 2, figure=fig, hspace=0.45, wspace=0.35)
-
         ax_scatter = fig.add_subplot(gs[0, 0])
-        ax_ts1     = fig.add_subplot(gs[0, 1])
-        ax_fc      = fig.add_subplot(gs[1, :])   # full-width bottom
+        ax_ts12    = fig.add_subplot(gs[0, 1])
+        ax_fc      = fig.add_subplot(gs[1, :])
 
-        # top-left: shifted week-1 scatter + fit
-        ax_scatter.scatter(x_train, y_train, s=8, alpha=0.4, linewidths=0)
-        xline = np.linspace(x_train.min(), x_train.max(), 200)
-        ax_scatter.plot(xline, np.polyval(coef1, xline), color="crimson", linewidth=1.5,
-                        label=f"linear  slope={slope:.3g}  r={train_r:.3f}")
-        ax_scatter.plot(xline, np.polyval(coef2, xline), color="darkorange", linewidth=1.5,
+        # top-left: shifted weeks 1+2 scatter + final fit
+        ax_scatter.scatter(x12, y12, s=8, alpha=0.4, linewidths=0)
+        xline = np.linspace(x12.min(), x12.max(), 200)
+        ax_scatter.plot(xline, np.polyval(coef1_final, xline), color="crimson", linewidth=1.5,
+                        label=f"linear  slope={slope:.3g}  r={train12_r:.3f}")
+        ax_scatter.plot(xline, np.polyval(coef2_final, xline), color="darkorange", linewidth=1.5,
                         linestyle="--", label="quadratic")
         ax_scatter.set_xlabel(temp_col)
         ax_scatter.set_ylabel(load_col)
-        ax_scatter.set_title(f"Week 1 (shifted {-offset_h:+d}h) — training fit  ({w1})")
+        ax_scatter.set_title(f"Weeks 1+2 (shifted {-offset_h:+d}h) — final fit  ({w1} / {w2})")
         ax_scatter.legend(fontsize=8)
 
-        # top-right: week-1 dual-axis time series built from the raw source
-        # DataFrames so coverage isn't limited to the inner-join overlap
-        _load_w1 = load_df[
+        # top-right: weeks 1+2 dual-axis time series
+        _load_w12 = load_df[
             (load_df[feeder_col] == feeder) &
             (load_df[time_col] >= t_start) &
-            (load_df[time_col] < t_split)
+            (load_df[time_col] < t_split2)
         ].copy()
-        _temp_w1 = temp_df[
-            (temp_df[time_col] >= t_start) & (temp_df[time_col] < t_split)
+        _temp_w12 = temp_df[
+            (temp_df[time_col] >= t_start) & (temp_df[time_col] < t_split2)
         ].copy()
-        _load_w1[load_col] = _load_w1[load_col].astype(float)
-        _temp_w1[temp_col] = _temp_w1[temp_col].astype(float)
+        _load_w12[load_col] = _load_w12[load_col].astype(float)
+        _temp_w12[temp_col] = _temp_w12[temp_col].astype(float)
+        ts_load = (_load_w12.set_index(time_col)[load_col]
+                   .groupby(level=0).mean().resample("1h").mean())
+        ts_temp = (_temp_w12.set_index(time_col)[temp_col]
+                   .groupby(level=0).mean().resample("1h").mean())
+        ax_ts12.plot(ts_load.index, ts_load.values, color="steelblue",
+                     linewidth=0.7, label=load_col, alpha=0.85)
+        ax_ts12.set_ylabel(load_col, color="steelblue")
+        ax_ts12.tick_params(axis="y", labelcolor="steelblue")
+        ax_ts12r = ax_ts12.twinx()
+        ax_ts12r.plot(ts_temp.index, ts_temp.values, color="darkorange",
+                      linewidth=0.7, label=temp_col, alpha=0.85)
+        ax_ts12r.set_ylabel(temp_col, color="darkorange")
+        ax_ts12r.tick_params(axis="y", labelcolor="darkorange")
+        lines12 = ax_ts12.get_lines() + ax_ts12r.get_lines()
+        ax_ts12.legend(lines12, [l.get_label() for l in lines12], fontsize=8, loc="upper left")
+        ax_ts12.set_title(f"Weeks 1+2 — Load & Temperature  ({w1} / {w2})")
+        ax_ts12.xaxis.set_major_formatter(mdates.DateFormatter("%m/%d"))
+        plt.setp(ax_ts12.get_xticklabels(), rotation=30, ha="right")
 
-        ts_load = (_load_w1.set_index(time_col)[load_col]
-                   .groupby(level=0).mean()
-                   .resample("1h").mean())   # keep NaN gaps, don't dropna
-        ts_temp = (_temp_w1.set_index(time_col)[temp_col]
-                   .groupby(level=0).mean()
-                   .resample("1h").mean())
-
-        ax_ts1.plot(ts_load.index, ts_load.values, color="steelblue",
-                    linewidth=0.7, label=load_col, alpha=0.85)
-        ax_ts1.set_ylabel(load_col, color="steelblue")
-        ax_ts1.tick_params(axis="y", labelcolor="steelblue")
-        ax_ts1r = ax_ts1.twinx()
-        ax_ts1r.plot(ts_temp.index, ts_temp.values, color="darkorange",
-                     linewidth=0.7, label=temp_col, alpha=0.85)
-        ax_ts1r.set_ylabel(temp_col, color="darkorange")
-        ax_ts1r.tick_params(axis="y", labelcolor="darkorange")
-        lines1 = ax_ts1.get_lines() + ax_ts1r.get_lines()
-        ax_ts1.legend(lines1, [l.get_label() for l in lines1], fontsize=8, loc="upper left")
-        ax_ts1.set_title(f"Week 1 — Load & Temperature  ({w1})")
-        ax_ts1.xaxis.set_major_formatter(mdates.DateFormatter("%m/%d"))
-        plt.setp(ax_ts1.get_xticklabels(), rotation=30, ha="right")
-
-        # bottom: week-2 actual vs forecast (full width)
-        # resample without dropna so NaN gaps break the line instead of
-        # connecting across missing timestamps with vertical-looking lines
-        w2s = (week2.set_index(time_col)[[load_col, "load_forecast", "load_forecast_quad"]]
+        # bottom: week-3 actual vs forecast (full width)
+        w3s = (week3.set_index(time_col)[[load_col, "load_forecast", "load_forecast_quad"]]
                .resample("1h").mean())
-        _ts_temp_fc = (temp_df[temp_df[time_col] >= t_split]
+        _ts_temp_fc = (temp_df[temp_df[time_col] >= t_split2]
                        .set_index(time_col)[temp_col].astype(float)
                        .groupby(level=0).mean().resample("1h").mean())
-        ax_fc.plot(w2s.index, w2s[load_col], color="steelblue", linewidth=0.9,
+        ax_fc.plot(w3s.index, w3s[load_col], color="steelblue", linewidth=0.9,
                    label="actual", alpha=0.9)
-        ax_fc.plot(w2s.index, w2s["load_forecast"], color="crimson", linewidth=0.9,
+        ax_fc.plot(w3s.index, w3s["load_forecast"], color="crimson", linewidth=0.9,
                    linestyle="--",
                    label=f"linear  MAE={mae:.4g}  r={forecast_r:.3f}", alpha=0.9)
-        ax_fc.plot(w2s.index, w2s["load_forecast_quad"], color="darkorange", linewidth=0.9,
+        ax_fc.plot(w3s.index, w3s["load_forecast_quad"], color="darkorange", linewidth=0.9,
                    linestyle=":",
                    label=f"quadratic  MAE={mae2:.4g}  r={forecast_r2:.3f}", alpha=0.9)
         ax_fc.set_ylabel(load_col)
@@ -1792,7 +1943,7 @@ def forecast_load_with_offset(load_df, temp_df,
         ax_fcr.tick_params(axis="y", labelcolor="seagreen")
         _lines_fc = ax_fc.get_lines() + ax_fcr.get_lines()
         ax_fc.legend(_lines_fc, [l.get_label() for l in _lines_fc], fontsize=8)
-        ax_fc.set_title(f"Week 2 — forecast vs actual  ({w2})")
+        ax_fc.set_title(f"Week 3 — forecast vs actual  ({w3})")
         ax_fc.xaxis.set_major_formatter(mdates.DateFormatter("%m/%d %H:%M"))
         plt.setp(ax_fc.get_xticklabels(), rotation=30, ha="right")
 
