@@ -1083,15 +1083,21 @@ def forecast_load_from_temperature(load_df, temp_df,
 
             # bottom-right: forecast vs actual
             ax4 = axes[1, 1]
-            _te_s = _te.set_index(time_col).sort_index()
+            _te_s = _te.set_index(time_col).sort_index().resample("1h").mean()
             ax4.plot(_te_s.index, _te_s[load_col], color="steelblue",
                      linewidth=0.9, label="actual", alpha=0.9)
             ax4.plot(_te_s.index, _te_s["load_forecast"], color="crimson",
                      linewidth=0.9, linestyle="--",
                      label=f"periodic  MAE={mae:.4g}  r={forecast_r:.3f}", alpha=0.9)
             ax4.set_ylabel(load_col)
+            ax4r = ax4.twinx()
+            ax4r.plot(_te_s.index, _te_s[temp_col], color="seagreen",
+                      linewidth=0.7, alpha=0.7, label=temp_col)
+            ax4r.set_ylabel(temp_col, color="seagreen")
+            ax4r.tick_params(axis="y", labelcolor="seagreen")
+            _lines4 = ax4.get_lines() + ax4r.get_lines()
+            ax4.legend(_lines4, [l.get_label() for l in _lines4], fontsize=8)
             ax4.set_title(f"Week 2 forecast vs actual  ({w2})")
-            ax4.legend(fontsize=8)
 
             fig.autofmt_xdate()
             fig.tight_layout()
@@ -1194,7 +1200,7 @@ def forecast_load_from_temperature(load_df, temp_df,
 
         # ── bottom-right: week 2 actual vs forecast ───────────────────────────
         ax4 = axes[1, 1]
-        test_sorted = test.set_index(time_col).sort_index()
+        test_sorted = test.set_index(time_col).sort_index().resample("1h").mean()
         ax4.plot(test_sorted.index, test_sorted[load_col], color="steelblue",
                  linewidth=0.9, label="actual", alpha=0.9)
         ax4.plot(test_sorted.index, test_sorted["load_forecast"], color="crimson",
@@ -1204,8 +1210,14 @@ def forecast_load_from_temperature(load_df, temp_df,
                  linewidth=0.9, linestyle=":",
                  label=f"quadratic  MAE={mae2:.4g}  r={forecast_r2:.3f}", alpha=0.9)
         ax4.set_ylabel(load_col)
+        ax4r = ax4.twinx()
+        ax4r.plot(test_sorted.index, test_sorted[temp_col], color="seagreen",
+                  linewidth=0.7, alpha=0.7, label=temp_col)
+        ax4r.set_ylabel(temp_col, color="seagreen")
+        ax4r.tick_params(axis="y", labelcolor="seagreen")
+        _lines4 = ax4.get_lines() + ax4r.get_lines()
+        ax4.legend(_lines4, [l.get_label() for l in _lines4], fontsize=8)
         ax4.set_title(f"Week 2 forecast vs actual  ({w2})")
-        ax4.legend(fontsize=8)
 
         fig.autofmt_xdate()
         fig.tight_layout()
@@ -1562,14 +1574,23 @@ def forecast_load_with_offset(load_df, temp_df,
             # bottom: week-2 actual vs periodic forecast
             w2s = (week2.set_index(time_col)[[load_col, "load_forecast"]]
                    .resample("1h").mean())
+            _ts_temp_fc = (temp_df[temp_df[time_col] >= t_split]
+                           .set_index(time_col)[temp_col].astype(float)
+                           .groupby(level=0).mean().resample("1h").mean())
             ax_fc.plot(w2s.index, w2s[load_col], color="steelblue", linewidth=0.9,
                        label="actual", alpha=0.9)
             ax_fc.plot(w2s.index, w2s["load_forecast"], color="crimson", linewidth=0.9,
                        linestyle="--",
                        label=f"periodic  MAE={mae:.4g}  r={forecast_r:.3f}", alpha=0.9)
             ax_fc.set_ylabel(load_col)
+            ax_fcr = ax_fc.twinx()
+            ax_fcr.plot(_ts_temp_fc.index, _ts_temp_fc.values, color="seagreen",
+                        linewidth=0.7, alpha=0.7, label=temp_col)
+            ax_fcr.set_ylabel(temp_col, color="seagreen")
+            ax_fcr.tick_params(axis="y", labelcolor="seagreen")
+            _lines_fc = ax_fc.get_lines() + ax_fcr.get_lines()
+            ax_fc.legend(_lines_fc, [l.get_label() for l in _lines_fc], fontsize=8)
             ax_fc.set_title(f"Week 2 — forecast vs actual  ({w2})")
-            ax_fc.legend(fontsize=8)
             ax_fc.xaxis.set_major_formatter(mdates.DateFormatter("%m/%d %H:%M"))
             plt.setp(ax_fc.get_xticklabels(), rotation=30, ha="right")
 
@@ -1752,6 +1773,9 @@ def forecast_load_with_offset(load_df, temp_df,
         # connecting across missing timestamps with vertical-looking lines
         w2s = (week2.set_index(time_col)[[load_col, "load_forecast", "load_forecast_quad"]]
                .resample("1h").mean())
+        _ts_temp_fc = (temp_df[temp_df[time_col] >= t_split]
+                       .set_index(time_col)[temp_col].astype(float)
+                       .groupby(level=0).mean().resample("1h").mean())
         ax_fc.plot(w2s.index, w2s[load_col], color="steelblue", linewidth=0.9,
                    label="actual", alpha=0.9)
         ax_fc.plot(w2s.index, w2s["load_forecast"], color="crimson", linewidth=0.9,
@@ -1761,8 +1785,14 @@ def forecast_load_with_offset(load_df, temp_df,
                    linestyle=":",
                    label=f"quadratic  MAE={mae2:.4g}  r={forecast_r2:.3f}", alpha=0.9)
         ax_fc.set_ylabel(load_col)
+        ax_fcr = ax_fc.twinx()
+        ax_fcr.plot(_ts_temp_fc.index, _ts_temp_fc.values, color="seagreen",
+                    linewidth=0.7, alpha=0.7, label=temp_col)
+        ax_fcr.set_ylabel(temp_col, color="seagreen")
+        ax_fcr.tick_params(axis="y", labelcolor="seagreen")
+        _lines_fc = ax_fc.get_lines() + ax_fcr.get_lines()
+        ax_fc.legend(_lines_fc, [l.get_label() for l in _lines_fc], fontsize=8)
         ax_fc.set_title(f"Week 2 — forecast vs actual  ({w2})")
-        ax_fc.legend(fontsize=8)
         ax_fc.xaxis.set_major_formatter(mdates.DateFormatter("%m/%d %H:%M"))
         plt.setp(ax_fc.get_xticklabels(), rotation=30, ha="right")
 
