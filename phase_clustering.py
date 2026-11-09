@@ -1008,28 +1008,40 @@ def forecast_load_from_temperature(load_df, temp_df,
 
         # periodic profile from week 1
         _tr = train.copy()
-        _tr["_hour"] = _tr[time_col].dt.hour
-        _tr["_is_wknd"] = (_tr[time_col].dt.dayofweek >= 5)
-        profile_w1 = (_tr.groupby(["_hour", "_is_wknd"])[load_col]
-                      .mean().reset_index().rename(columns={load_col: "_fc"}))
-        hour_mean_w1 = _tr.groupby("_hour")[load_col].mean()
+        _tr["_h"]   = _tr[time_col].dt.hour
+        _tr["_dow"] = _tr[time_col].dt.dayofweek
+        profile_w1   = _tr.groupby(["_h", "_dow"])[load_col].mean()
+        hour_mean_w1 = _tr.groupby("_h")[load_col].mean()
 
         # temperature model from week 1
         coef1_w1 = np.polyfit(x_train, y_train, 1)
         coef2_w1 = np.polyfit(x_train, y_train, 2)
 
+        # (hour, dow) residual profiles for hybrid temperature validation
+        _tr2 = _tr.copy()
+        _tr2["_rl"] = _tr2[load_col] - np.polyval(coef1_w1, _tr2[temp_col].values)
+        _tr2["_rq"] = _tr2[load_col] - np.polyval(coef2_w1, _tr2[temp_col].values)
+        rp1_w1 = _tr2.groupby(["_h", "_dow"])["_rl"].mean()
+        rp2_w1 = _tr2.groupby(["_h", "_dow"])["_rq"].mean()
+        rh1_w1 = _tr2.groupby("_h")["_rl"].mean()
+        rh2_w1 = _tr2.groupby("_h")["_rq"].mean()
+
+        def _resid(r, rp, rh):
+            return rp.get((r["_h"], r["_dow"]), rh.get(r["_h"], 0.0))
+
         # ── step 2: validate on week 2 ──────────────────────────────────────
         _val = val.copy()
-        _val["_hour"] = _val[time_col].dt.hour
-        _val["_is_wknd"] = (_val[time_col].dt.dayofweek >= 5)
-        _val = _val.merge(profile_w1, on=["_hour", "_is_wknd"], how="left")
-        miss = _val["_fc"].isna()
-        if miss.any():
-            _val.loc[miss, "_fc"] = _val.loc[miss, "_hour"].map(hour_mean_w1)
+        _val["_h"]   = _val[time_col].dt.hour
+        _val["_dow"] = _val[time_col].dt.dayofweek
+        _val["_fc"] = _val.apply(
+            lambda r: profile_w1.get((r["_h"], r["_dow"]),
+                                     hour_mean_w1.get(r["_h"], float("nan"))), axis=1)
         y_val_act  = val[load_col].values
         y_val_per  = _val["_fc"].values
-        y_val_lin  = np.polyval(coef1_w1, val[temp_col].values)
-        y_val_quad = np.polyval(coef2_w1, val[temp_col].values)
+        y_val_lin  = (np.polyval(coef1_w1, val[temp_col].values)
+                      + _val.apply(lambda r: _resid(r, rp1_w1, rh1_w1), axis=1).values)
+        y_val_quad = (np.polyval(coef2_w1, val[temp_col].values)
+                      + _val.apply(lambda r: _resid(r, rp2_w1, rh2_w1), axis=1).values)
 
         val_mae_periodic    = float(np.mean(np.abs(y_val_act - y_val_per)))
         val_mae_lin         = float(np.mean(np.abs(y_val_act - y_val_lin)))
@@ -1047,30 +1059,37 @@ def forecast_load_from_temperature(load_df, temp_df,
 
         if use_periodic:
             _tr12 = train12.copy()
-            _tr12["_hour"] = _tr12[time_col].dt.hour
-            _tr12["_is_wknd"] = (_tr12[time_col].dt.dayofweek >= 5)
-            profile_final = (_tr12.groupby(["_hour", "_is_wknd"])[load_col]
-                             .mean().reset_index().rename(columns={load_col: "_fc"}))
-            hour_mean_final = _tr12.groupby("_hour")[load_col].mean()
+            _tr12["_h"]   = _tr12[time_col].dt.hour
+            _tr12["_dow"] = _tr12[time_col].dt.dayofweek
+            profile_final   = _tr12.groupby(["_h", "_dow"])[load_col].mean()
+            hour_mean_final = _tr12.groupby("_h")[load_col].mean()
         else:
             x12 = train12[temp_col].values
             y12 = train12[load_col].values
             coef1_final = np.polyfit(x12, y12, 1)
             coef2_final = np.polyfit(x12, y12, 2)
             slope_final, intercept_final = float(coef1_final[0]), float(coef1_final[1])
+            _tr12r = train12.copy()
+            _tr12r["_h"]   = _tr12r[time_col].dt.hour
+            _tr12r["_dow"] = _tr12r[time_col].dt.dayofweek
+            _tr12r["_rl"]  = _tr12r[load_col] - np.polyval(coef1_final, _tr12r[temp_col].values)
+            _tr12r["_rq"]  = _tr12r[load_col] - np.polyval(coef2_final, _tr12r[temp_col].values)
+            rp1_f = _tr12r.groupby(["_h", "_dow"])["_rl"].mean()
+            rp2_f = _tr12r.groupby(["_h", "_dow"])["_rq"].mean()
+            rh1_f = _tr12r.groupby("_h")["_rl"].mean()
+            rh2_f = _tr12r.groupby("_h")["_rq"].mean()
 
         # ── step 4: forecast week 3 ──────────────────────────────────────────
         if use_periodic:
             _te = test.copy()
-            _te["_hour"] = _te[time_col].dt.hour
-            _te["_is_wknd"] = (_te[time_col].dt.dayofweek >= 5)
-            _te = _te.merge(profile_final, on=["_hour", "_is_wknd"], how="left")
-            miss = _te["_fc"].isna()
-            if miss.any():
-                _te.loc[miss, "_fc"] = _te.loc[miss, "_hour"].map(hour_mean_final)
+            _te["_h"]   = _te[time_col].dt.hour
+            _te["_dow"] = _te[time_col].dt.dayofweek
+            _te["_fc"] = _te.apply(
+                lambda r: profile_final.get((r["_h"], r["_dow"]),
+                                            hour_mean_final.get(r["_h"], float("nan"))), axis=1)
             _te["load_forecast"]      = _te["_fc"]
             _te["load_forecast_quad"] = _te["_fc"]
-            _te.drop(columns=["_hour", "_is_wknd", "_fc"], inplace=True)
+            _te.drop(columns=["_h", "_dow", "_fc"], inplace=True)
 
             y_actual = _te[load_col].values
             mae, rmse, forecast_r = _m(y_actual, _te["load_forecast"].values)
@@ -1098,21 +1117,22 @@ def forecast_load_from_temperature(load_df, temp_df,
             hours = np.arange(24)
 
             def _plot_profile(ax_, df_, title_):
-                for is_wknd, lbl, clr in [(False, "weekday", "steelblue"),
-                                          (True,  "weekend", "darkorange")]:
-                    sub = df_[df_[time_col].dt.dayofweek >= 5 if is_wknd
-                              else df_[time_col].dt.dayofweek < 5]
+                _dow_cmap  = plt.get_cmap("tab10")
+                _dow_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+                for dow in range(7):
+                    sub = df_[df_[time_col].dt.dayofweek == dow]
                     if sub.empty:
                         continue
                     sub = sub.copy()
                     sub["_h"] = sub[time_col].dt.hour
                     hm = sub.groupby("_h")[load_col].mean()
                     ax_.plot(hours, [hm.get(h, np.nan) for h in hours],
-                             "o-", color=clr, linewidth=1.4, markersize=4, label=lbl)
+                             "o-", color=_dow_cmap(dow), linewidth=1.4, markersize=4,
+                             label=_dow_names[dow])
                 ax_.set_xlabel("hour of day")
                 ax_.set_ylabel(load_col)
                 ax_.set_title(title_)
-                ax_.legend(fontsize=8)
+                ax_.legend(fontsize=7, ncol=2)
                 ax_.set_xticks(range(0, 24, 3))
 
             _plot_profile(axes[0, 0], train12, f"Weeks 1+2 load profile (final)  ({w1} / {w2})")
@@ -1157,13 +1177,18 @@ def forecast_load_from_temperature(load_df, temp_df,
             continue
 
         # ── temperature-based branch ─────────────────────────────────────────
+        test = test.copy()
+        test["_h"]   = test[time_col].dt.hour
+        test["_dow"] = test[time_col].dt.dayofweek
         x_test = test[temp_col].values
         y_actual = test[load_col].values
-        y_fc_lin  = np.polyval(coef1_final, x_test)
-        y_fc_quad = np.polyval(coef2_final, x_test)
-        test = test.copy()
+        y_fc_lin  = (np.polyval(coef1_final, x_test)
+                     + test.apply(lambda r: _resid(r, rp1_f, rh1_f), axis=1).values)
+        y_fc_quad = (np.polyval(coef2_final, x_test)
+                     + test.apply(lambda r: _resid(r, rp2_f, rh2_f), axis=1).values)
         test["load_forecast"]      = y_fc_lin
         test["load_forecast_quad"] = y_fc_quad
+        test.drop(columns=["_h", "_dow"], inplace=True)
 
         slope, intercept = slope_final, intercept_final
         mae,  rmse,  forecast_r  = _m(y_actual, y_fc_lin)
@@ -1522,11 +1547,10 @@ def forecast_load_with_offset(load_df, temp_df,
             (load_df[time_col] < t_split1)
         ].copy()
         fload_w1p[load_col] = fload_w1p[load_col].astype(float)
-        fload_w1p["_hour"]    = fload_w1p[time_col].dt.hour
-        fload_w1p["_is_wknd"] = (fload_w1p[time_col].dt.dayofweek >= 5)
-        profile_w1 = (fload_w1p.groupby(["_hour", "_is_wknd"])[load_col]
-                      .mean().reset_index().rename(columns={load_col: "_fc"}))
-        hour_mean_w1 = fload_w1p.groupby("_hour")[load_col].mean()
+        fload_w1p["_h"]   = fload_w1p[time_col].dt.hour
+        fload_w1p["_dow"] = fload_w1p[time_col].dt.dayofweek
+        profile_w1   = fload_w1p.groupby(["_h", "_dow"])[load_col].mean()
+        hour_mean_w1 = fload_w1p.groupby("_h")[load_col].mean()
 
         # raw correlation for fallback heuristic
         with np.errstate(divide="ignore", invalid="ignore"):
@@ -1581,6 +1605,21 @@ def forecast_load_with_offset(load_df, temp_df,
         if np.isnan(train_r):
             train_r = 0.0
 
+        # (hour, dow) residual profiles using original-time coords
+        orig_times_w1 = train_agg1[time_col] + pd.Timedelta(hours=offset_h_w1)
+        _tagg1r = train_agg1.copy()
+        _tagg1r["_h"]   = orig_times_w1.dt.hour
+        _tagg1r["_dow"] = orig_times_w1.dt.dayofweek
+        _tagg1r["_rl"]  = _tagg1r[load_col] - np.polyval(coef1_w1, _tagg1r[temp_col].values)
+        _tagg1r["_rq"]  = _tagg1r[load_col] - np.polyval(coef2_w1, _tagg1r[temp_col].values)
+        rp1_w1 = _tagg1r.groupby(["_h", "_dow"])["_rl"].mean()
+        rp2_w1 = _tagg1r.groupby(["_h", "_dow"])["_rq"].mean()
+        rh1_w1 = _tagg1r.groupby("_h")["_rl"].mean()
+        rh2_w1 = _tagg1r.groupby("_h")["_rq"].mean()
+
+        def _resid(r, rp, rh):
+            return rp.get((r["_h"], r["_dow"]), rh.get(r["_h"], 0.0))
+
         # ── step 2: validate on week 2 ──────────────────────────────────────
 
         # periodic validation
@@ -1590,14 +1629,13 @@ def forecast_load_with_offset(load_df, temp_df,
             (load_df[time_col] < t_split2)
         ].copy()
         fload_w2v[load_col] = fload_w2v[load_col].astype(float)
-        fload_w2v["_hour"]    = fload_w2v[time_col].dt.hour
-        fload_w2v["_is_wknd"] = (fload_w2v[time_col].dt.dayofweek >= 5)
-        fload_w2v = fload_w2v.merge(profile_w1, on=["_hour", "_is_wknd"], how="left")
-        miss = fload_w2v["_fc"].isna()
-        if miss.any():
-            fload_w2v.loc[miss, "_fc"] = fload_w2v.loc[miss, "_hour"].map(hour_mean_w1)
+        fload_w2v["_h"]   = fload_w2v[time_col].dt.hour
+        fload_w2v["_dow"] = fload_w2v[time_col].dt.dayofweek
+        fload_w2v["_fc"] = fload_w2v.apply(
+            lambda r: profile_w1.get((r["_h"], r["_dow"]),
+                                     hour_mean_w1.get(r["_h"], float("nan"))), axis=1)
         fload_w2v["_fc_per"] = fload_w2v["_fc"]
-        fload_w2v.drop(columns=["_hour", "_is_wknd", "_fc"], inplace=True)
+        fload_w2v.drop(columns=["_h", "_dow", "_fc"], inplace=True)
         val_per = (fload_w2v.set_index(time_col)[[load_col, "_fc_per"]]
                    .resample("1h").mean().dropna().reset_index())
 
@@ -1606,9 +1644,14 @@ def forecast_load_with_offset(load_df, temp_df,
             (temp_df[time_col] >= t_split1) & (temp_df[time_col] < t_split2)
         ].copy()
         ftemp_w2v[temp_col] = ftemp_w2v[temp_col].astype(float)
-        ftemp_w2v["_fc_lin"]  = np.polyval(coef1_w1, ftemp_w2v[temp_col].values)
-        ftemp_w2v["_fc_quad"] = np.polyval(coef2_w1, ftemp_w2v[temp_col].values)
+        ftemp_w2v["_h"]   = (ftemp_w2v[time_col] + pd.Timedelta(hours=offset_h_w1)).dt.hour
+        ftemp_w2v["_dow"] = (ftemp_w2v[time_col] + pd.Timedelta(hours=offset_h_w1)).dt.dayofweek
+        ftemp_w2v["_fc_lin"]  = (np.polyval(coef1_w1, ftemp_w2v[temp_col].values)
+                                  + ftemp_w2v.apply(lambda r: _resid(r, rp1_w1, rh1_w1), axis=1).values)
+        ftemp_w2v["_fc_quad"] = (np.polyval(coef2_w1, ftemp_w2v[temp_col].values)
+                                  + ftemp_w2v.apply(lambda r: _resid(r, rp2_w1, rh2_w1), axis=1).values)
         ftemp_w2v[time_col] = ftemp_w2v[time_col] + pd.Timedelta(hours=offset_h_w1)
+        ftemp_w2v.drop(columns=["_h", "_dow"], inplace=True)
 
         fload_w2a = load_df[
             (load_df[feeder_col] == feeder) &
@@ -1652,11 +1695,10 @@ def forecast_load_with_offset(load_df, temp_df,
                 (load_df[time_col] < t_split2)
             ].copy()
             fload_w12p[load_col] = fload_w12p[load_col].astype(float)
-            fload_w12p["_hour"]    = fload_w12p[time_col].dt.hour
-            fload_w12p["_is_wknd"] = (fload_w12p[time_col].dt.dayofweek >= 5)
-            profile_final = (fload_w12p.groupby(["_hour", "_is_wknd"])[load_col]
-                             .mean().reset_index().rename(columns={load_col: "_fc"}))
-            hour_mean_final = fload_w12p.groupby("_hour")[load_col].mean()
+            fload_w12p["_h"]   = fload_w12p[time_col].dt.hour
+            fload_w12p["_dow"] = fload_w12p[time_col].dt.dayofweek
+            profile_final   = fload_w12p.groupby(["_h", "_dow"])[load_col].mean()
+            hour_mean_final = fload_w12p.groupby("_h")[load_col].mean()
             offset_h = 0
         else:
             # recompute offset from weeks 1+2 merged data
@@ -1699,6 +1741,16 @@ def forecast_load_with_offset(load_df, temp_df,
             slope_final, intercept_final = float(coef1_final[0]), float(coef1_final[1])
             with np.errstate(divide="ignore", invalid="ignore"):
                 train12_r = float(np.corrcoef(x12, y12)[0, 1])
+            orig_times_12 = train_agg12[time_col] + pd.Timedelta(hours=offset_h)
+            _tagg12r = train_agg12.copy()
+            _tagg12r["_h"]   = orig_times_12.dt.hour
+            _tagg12r["_dow"] = orig_times_12.dt.dayofweek
+            _tagg12r["_rl"]  = _tagg12r[load_col] - np.polyval(coef1_final, _tagg12r[temp_col].values)
+            _tagg12r["_rq"]  = _tagg12r[load_col] - np.polyval(coef2_final, _tagg12r[temp_col].values)
+            rp1_f = _tagg12r.groupby(["_h", "_dow"])["_rl"].mean()
+            rp2_f = _tagg12r.groupby(["_h", "_dow"])["_rq"].mean()
+            rh1_f = _tagg12r.groupby("_h")["_rl"].mean()
+            rh2_f = _tagg12r.groupby("_h")["_rq"].mean()
 
         # ── step 4: forecast week 3 ──────────────────────────────────────────
         if use_periodic:
@@ -1707,15 +1759,14 @@ def forecast_load_with_offset(load_df, temp_df,
                 (load_df[time_col] >= t_split2)
             ].copy()
             fload_w3p[load_col] = fload_w3p[load_col].astype(float)
-            fload_w3p["_hour"]    = fload_w3p[time_col].dt.hour
-            fload_w3p["_is_wknd"] = (fload_w3p[time_col].dt.dayofweek >= 5)
-            fload_w3p = fload_w3p.merge(profile_final, on=["_hour", "_is_wknd"], how="left")
-            miss = fload_w3p["_fc"].isna()
-            if miss.any():
-                fload_w3p.loc[miss, "_fc"] = fload_w3p.loc[miss, "_hour"].map(hour_mean_final)
+            fload_w3p["_h"]   = fload_w3p[time_col].dt.hour
+            fload_w3p["_dow"] = fload_w3p[time_col].dt.dayofweek
+            fload_w3p["_fc"] = fload_w3p.apply(
+                lambda r: profile_final.get((r["_h"], r["_dow"]),
+                                            hour_mean_final.get(r["_h"], float("nan"))), axis=1)
             fload_w3p["load_forecast"]      = fload_w3p["_fc"]
             fload_w3p["load_forecast_quad"] = fload_w3p["_fc"]
-            fload_w3p.drop(columns=["_hour", "_is_wknd", "_fc"], inplace=True)
+            fload_w3p.drop(columns=["_h", "_dow", "_fc"], inplace=True)
             week3 = (fload_w3p.set_index(time_col)[[load_col, "load_forecast", "load_forecast_quad"]]
                      .resample("1h").mean().dropna().reset_index())
 
@@ -1758,21 +1809,22 @@ def forecast_load_with_offset(load_df, temp_df,
                 (load_df[time_col] < t_split2)
             ].copy()
             hours = np.arange(24)
-            for is_wknd, lbl, clr in [(False, "weekday", "steelblue"),
-                                      (True,  "weekend", "darkorange")]:
-                sub = fload_w12p_plot[fload_w12p_plot[time_col].dt.dayofweek >= 5
-                                      if is_wknd else fload_w12p_plot[time_col].dt.dayofweek < 5]
+            _dow_cmap  = plt.get_cmap("tab10")
+            _dow_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+            for dow in range(7):
+                sub = fload_w12p_plot[fload_w12p_plot[time_col].dt.dayofweek == dow]
                 if sub.empty:
                     continue
                 sub = sub.copy()
                 sub["_h"] = sub[time_col].dt.hour
                 hm = sub.groupby("_h")[load_col].mean()
                 ax_prof.plot(hours, [hm.get(h, np.nan) for h in hours],
-                             "o-", color=clr, linewidth=1.4, markersize=4, label=lbl)
+                             "o-", color=_dow_cmap(dow), linewidth=1.4, markersize=4,
+                             label=_dow_names[dow])
             ax_prof.set_xlabel("hour of day")
             ax_prof.set_ylabel(load_col)
             ax_prof.set_title(f"Weeks 1+2 hourly load profile  ({w1} / {w2})")
-            ax_prof.legend(fontsize=8)
+            ax_prof.legend(fontsize=7, ncol=2)
             ax_prof.set_xticks(range(0, 24, 3))
 
             # top-right: weeks 1+2 load time series
@@ -1821,9 +1873,14 @@ def forecast_load_with_offset(load_df, temp_df,
         # ── temperature branch: forecast week 3 ─────────────────────────────
         ftemp_w3 = temp_df[temp_df[time_col] >= t_split2].copy()
         ftemp_w3[temp_col] = ftemp_w3[temp_col].astype(float)
-        ftemp_w3["load_forecast"]      = np.polyval(coef1_final, ftemp_w3[temp_col].values)
-        ftemp_w3["load_forecast_quad"] = np.polyval(coef2_final, ftemp_w3[temp_col].values)
+        ftemp_w3["_h"]   = (ftemp_w3[time_col] + pd.Timedelta(hours=offset_h)).dt.hour
+        ftemp_w3["_dow"] = (ftemp_w3[time_col] + pd.Timedelta(hours=offset_h)).dt.dayofweek
+        ftemp_w3["load_forecast"]      = (np.polyval(coef1_final, ftemp_w3[temp_col].values)
+                                          + ftemp_w3.apply(lambda r: _resid(r, rp1_f, rh1_f), axis=1).values)
+        ftemp_w3["load_forecast_quad"] = (np.polyval(coef2_final, ftemp_w3[temp_col].values)
+                                          + ftemp_w3.apply(lambda r: _resid(r, rp2_f, rh2_f), axis=1).values)
         ftemp_w3[time_col] = ftemp_w3[time_col] + pd.Timedelta(hours=offset_h)
+        ftemp_w3.drop(columns=["_h", "_dow"], inplace=True)
 
         fload_w3 = load_df[
             (load_df[feeder_col] == feeder) &
