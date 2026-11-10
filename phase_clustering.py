@@ -314,20 +314,27 @@ def plot_phase_voltages(df1, df2, phase1, phase2=None,
             if in_run:
                 neg_periods.append((run_start, s1.index[-1]))
 
+    # z-score each series so amplitude differences don't hide shape similarity
+    def _z(s):
+        sigma = s.std()
+        return (s - s.mean()) / sigma if sigma > 0 else s - s.mean()
+
+    s1z, s2z = _z(s1), _z(s2)
+
     fig, ax = plt.subplots(figsize=(14, 5))
-    ax.plot(s1.index, s1.values, linewidth=0.8, label=label1, alpha=0.8)
-    ax.plot(s2.index, s2.values, linewidth=0.8, label=label2, alpha=0.8)
+    ax.plot(s1z.index, s1z.values, linewidth=0.8, label=label1, alpha=0.8)
+    ax.plot(s2z.index, s2z.values, linewidth=0.8, label=label2, alpha=0.8)
 
     for start, end in neg_periods:
         ax.axvspan(start, end, color="red", alpha=0.1)
 
     ax.set_xlabel("Timestamp (CST)")
-    ax.set_ylabel("Voltage")
+    ax.set_ylabel("Voltage (z-score)")
     ax.set_title(f"{phase_label} — Pearson r = {corr:.4f}")
     ax.legend()
 
-    all_vals = np.concatenate([s1.values, s2.values])
-    vmin, vmax = np.nanmin(all_vals), np.nanmax(all_vals)
+    all_z = np.concatenate([s1z.values, s2z.values])
+    vmin, vmax = np.nanmin(all_z), np.nanmax(all_z)
     margin = (vmax - vmin) * 0.02 or 0.1
     ax.set_ylim(vmin - margin, vmax + margin)
     ax.yaxis.set_major_locator(plt.MaxNLocator(nbins=10))
