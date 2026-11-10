@@ -314,34 +314,43 @@ def plot_phase_voltages(df1, df2, phase1, phase2=None,
             if in_run:
                 neg_periods.append((run_start, s1.index[-1]))
 
-    # z-score each series so amplitude differences don't hide shape similarity
-    def _z(s):
-        sigma = s.std()
-        return (s - s.mean()) / sigma if sigma > 0 else s - s.mean()
-
-    s1z, s2z = _z(s1), _z(s2)
+    # Use twin axes so each series shows its own actual voltage values on
+    # left/right sides, but both are visually aligned by spanning the same
+    # number of standard deviations (z-score alignment without losing units).
+    std1 = s1.std() if s1.std() > 0 else 1.0
+    std2 = s2.std() if s2.std() > 0 else 1.0
+    # k = half-range in units of std to show (covers the full data range + margin)
+    k1 = (s1.max() - s1.min()) / (2 * std1) if std1 > 0 else 3.0
+    k2 = (s2.max() - s2.min()) / (2 * std2) if std2 > 0 else 3.0
+    k = max(k1, k2) * 1.05
 
     fig, ax = plt.subplots(figsize=(14, 5))
-    ax.plot(s1z.index, s1z.values, linewidth=0.8, label=label1, alpha=0.8)
-    ax.plot(s2z.index, s2z.values, linewidth=0.8, label=label2, alpha=0.8)
+    ax2 = ax.twinx()
+
+    ax.plot(s1.index, s1.values, linewidth=0.8, label=label1, alpha=0.8, color="C0")
+    ax2.plot(s2.index, s2.values, linewidth=0.8, label=label2, alpha=0.8, color="C1")
+
+    ax.set_ylim(s1.mean() - k * std1, s1.mean() + k * std1)
+    ax2.set_ylim(s2.mean() - k * std2, s2.mean() + k * std2)
 
     for start, end in neg_periods:
         ax.axvspan(start, end, color="red", alpha=0.1)
 
     ax.set_xlabel("Timestamp (CST)")
-    ax.set_ylabel("Voltage (z-score)")
+    ax.set_ylabel(f"{label1} Voltage", color="C0")
+    ax.tick_params(axis="y", labelcolor="C0")
+    ax2.set_ylabel(f"{label2} Voltage", color="C1")
+    ax2.tick_params(axis="y", labelcolor="C1")
     ax.set_title(f"{phase_label} — Pearson r = {corr:.4f}")
-    ax.legend()
 
-    all_z = np.concatenate([s1z.values, s2z.values])
-    vmin, vmax = np.nanmin(all_z), np.nanmax(all_z)
-    margin = (vmax - vmin) * 0.02 or 0.1
-    ax.set_ylim(vmin - margin, vmax + margin)
-    ax.yaxis.set_major_locator(plt.MaxNLocator(nbins=10))
+    lines = ax.get_lines() + ax2.get_lines()
+    ax.legend(lines, [l.get_label() for l in lines], fontsize=8)
+
+    ax.yaxis.set_major_locator(plt.MaxNLocator(nbins=8))
+    ax2.yaxis.set_major_locator(plt.MaxNLocator(nbins=8))
 
     fig.autofmt_xdate()
     fig.tight_layout()
-    ax.set_ylim(vmin - margin, vmax + margin)
 
     if neg_periods:
         print(f"\n[{phase_label}] {len(neg_periods)} negatively correlated period(s):")
