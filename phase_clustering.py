@@ -274,7 +274,9 @@ def plot_phase_voltages(df1, df2, phase1, phase2=None,
                         label1="Dataset 1",
                         label2="Dataset 2",
                         start_time=None,
-                        end_time=None):
+                        end_time=None,
+                        cross_corr=False,
+                        max_lag_hours=24):
     if phase2 is None:
         phase2 = phase1
     df1 = _filter_time(df1, time_col, start_time, end_time)
@@ -294,6 +296,38 @@ def plot_phase_voltages(df1, df2, phase1, phase2=None,
         return float("nan")
 
     corr = _corr(s1, s2)
+
+    # --- cross-correlation: find the lag that maximises Pearson r ----------
+    best_lag = 0
+    best_lag_corr = corr
+    lag_corr_series = None
+    if cross_corr and len(s1) >= 4:
+        # determine slot size from the index
+        diffs = pd.Series(s1.index).diff().dropna()
+        slot = diffs.median() if not diffs.empty else pd.Timedelta(minutes=15)
+        max_slots = max(1, int(pd.Timedelta(hours=max_lag_hours) / slot))
+        max_slots = min(max_slots, len(s1) - 2)
+
+        lags = range(-max_slots, max_slots + 1)
+        lag_corrs = []
+        for lag in lags:
+            if lag == 0:
+                lag_corrs.append(corr)
+            elif lag > 0:
+                r = _corr(s1.iloc[lag:], s2.iloc[:-lag])
+            else:
+                r = _corr(s1.iloc[:lag], s2.iloc[-lag:])
+            if lag != 0:
+                lag_corrs.append(r)
+
+        lag_corr_series = pd.Series(lag_corrs, index=list(lags))
+        best_idx = int(np.nanargmax(np.abs(lag_corr_series.values)))
+        best_lag = lag_corr_series.index[best_idx]
+        best_lag_corr = lag_corr_series.iloc[best_idx]
+        best_lag_td = slot * best_lag
+
+        print(f"\n[{phase_label}] Cross-correlation: best lag = {best_lag} slots "
+              f"({best_lag_td}), r = {best_lag_corr:.4f}  (zero-lag r = {corr:.4f})")
 
     # rolling correlation to find negatively correlated windows
     window = min(SLOTS_PER_DAY, len(s1))
@@ -324,7 +358,11 @@ def plot_phase_voltages(df1, df2, phase1, phase2=None,
     k2 = (s2.max() - s2.min()) / (2 * std2) if std2 > 0 else 3.0
     k = max(k1, k2) * 1.05
 
-    fig, ax = plt.subplots(figsize=(14, 5))
+    n_rows = 2 if (cross_corr and lag_corr_series is not None) else 1
+    fig_h = 9 if n_rows == 2 else 5
+    fig, axes = plt.subplots(n_rows, 1, figsize=(14, fig_h),
+                             gridspec_kw={"height_ratios": [3, 1] if n_rows == 2 else [1]})
+    ax = axes[0] if n_rows == 2 else axes
     ax2 = ax.twinx()
 
     ax.plot(s1.index, s1.values, linewidth=0.8, label=label1, alpha=0.8, color="C0")
@@ -341,13 +379,30 @@ def plot_phase_voltages(df1, df2, phase1, phase2=None,
     ax.tick_params(axis="y", labelcolor="C0")
     ax2.set_ylabel(f"{label2} Voltage", color="C1")
     ax2.tick_params(axis="y", labelcolor="C1")
-    ax.set_title(f"{phase_label} — Pearson r = {corr:.4f}")
+
+    title = f"{phase_label} — Pearson r = {corr:.4f}"
+    if cross_corr and best_lag != 0:
+        title += f"  |  best lag = {best_lag} slots  r = {best_lag_corr:.4f}"
+    ax.set_title(title)
 
     lines = ax.get_lines() + ax2.get_lines()
     ax.legend(lines, [l.get_label() for l in lines], fontsize=8)
 
     ax.yaxis.set_major_locator(plt.MaxNLocator(nbins=8))
     ax2.yaxis.set_major_locator(plt.MaxNLocator(nbins=8))
+
+    if cross_corr and lag_corr_series is not None:
+        ax_xc = axes[1]
+        ax_xc.bar(lag_corr_series.index, lag_corr_series.values,
+                  width=0.8, color="steelblue", alpha=0.7)
+        ax_xc.axvline(best_lag, color="red", linewidth=1.2, linestyle="--",
+                      label=f"best lag={best_lag} (r={best_lag_corr:.3f})")
+        ax_xc.axvline(0, color="grey", linewidth=0.8, linestyle=":")
+        ax_xc.axhline(0, color="black", linewidth=0.6)
+        ax_xc.set_xlabel("Lag (slots)")
+        ax_xc.set_ylabel("Pearson r")
+        ax_xc.set_title("Cross-correlation by lag")
+        ax_xc.legend(fontsize=8)
 
     fig.autofmt_xdate()
     fig.tight_layout()
@@ -361,6 +416,9 @@ def plot_phase_voltages(df1, df2, phase1, phase2=None,
         print(f"\n[{phase_label}] No negatively correlated periods found.")
 
     plt.show()
+    if cross_corr and lag_corr_series is not None:
+        return {"r": corr, "best_lag": best_lag, "best_lag_r": best_lag_corr,
+                "lag_corr": lag_corr_series}
     return corr
 
 
