@@ -343,19 +343,28 @@ def average_phase_profiles(feeders,
         avg_cols[ph] = combined.mean(axis=1)
 
     if not avg_cols:
-        return pd.DataFrame(), pd.DataFrame(columns=["feeder", "phase", "r", "n_overlap"])
+        return pd.DataFrame(columns=[time_col, voltage_col, phase_col]), \
+               pd.DataFrame(columns=["feeder", "phase", "r", "n_overlap"])
 
-    avg_df = pd.DataFrame(avg_cols).sort_index()
-    avg_df.index.name = time_col
+    # Build a wide DataFrame internally for mismatch checks, then melt to
+    # long format matching the input shape (time_col, voltage_col, phase_col).
+    avg_wide = pd.DataFrame(avg_cols).sort_index()
+    avg_wide.index.name = time_col
+    avg_df = (avg_wide
+              .reset_index()
+              .melt(id_vars=time_col, var_name=phase_col, value_name=voltage_col)
+              .dropna(subset=[voltage_col])
+              .sort_values([time_col, phase_col])
+              .reset_index(drop=True))
 
     # ------------------------------------------------------------------ #
     # Step 3 – flag feeders whose shape deviates from the group average   #
     # ------------------------------------------------------------------ #
     mismatch_rows = []
     for ph in phases:
-        if ph not in avg_df.columns or not z_map[ph]:
+        if ph not in avg_wide.columns or not z_map[ph]:
             continue
-        avg_series = avg_df[ph].dropna()
+        avg_series = avg_wide[ph].dropna()
         for label, z in z_map[ph].items():
             common = avg_series.index.intersection(z.index)
             if len(common) < 2:
@@ -377,7 +386,7 @@ def average_phase_profiles(feeders,
     # ------------------------------------------------------------------ #
     n_feeders = len(feeders)
     print(f"average_phase_profiles: {n_feeders} feeder(s), "
-          f"phases present: {list(avg_df.columns)}")
+          f"phases present: {list(avg_wide.columns)}")
     if mismatch_df.empty:
         print("  No shape mismatches detected "
               f"(threshold r >= {mismatch_r_threshold}).")
