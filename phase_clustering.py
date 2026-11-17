@@ -582,6 +582,10 @@ def phase_correlation_matrix(df1, df2,
             if len(a) > 1:
                 mat.loc[p1, p2] = _corr(a, b)
 
+    if mat.isna().all().all():
+        print(f"phase_correlation_matrix: no overlapping data between {label1} and {label2} — plot skipped.")
+        return mat
+
     fig, ax = plt.subplots(figsize=(6, 5))
     im = ax.imshow(mat.values.astype(float), cmap="RdYlGn", vmin=-1, vmax=1)
     ax.set_xticks(range(len(phases)))
