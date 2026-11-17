@@ -278,9 +278,10 @@ def average_phase_profiles(feeders,
 
     Parameters
     ----------
-    feeders : list of (df, label)
-        Each df is a raw feeder DataFrame containing columns for time, voltage,
-        and phase.  label is a human-readable name used in the mismatch report.
+    feeders : list of pd.DataFrame
+        Each DataFrame is a raw feeder dataset with columns for time, voltage,
+        and phase (same format as the inputs to plot_phase_voltages).
+        Feeders are labelled automatically as "Feeder 0", "Feeder 1", …
     time_col, voltage_col, phase_col : column names
     resample_freq : resampling frequency applied before averaging
     mismatch_r_threshold : Pearson r below this value flags a feeder's phase
@@ -289,7 +290,7 @@ def average_phase_profiles(feeders,
     Returns
     -------
     avg_df : pd.DataFrame
-        Index = timestamps (union of all resampled times), one column per phase.
+        Index = timestamps, one column per phase present in the data.
         Values are the mean z-score-normalised voltage shape.
     mismatch_df : pd.DataFrame
         One row per (feeder, phase) combination whose shape r < threshold.
@@ -304,7 +305,8 @@ def average_phase_profiles(feeders,
     # z_map[phase][label] = z-scored pd.Series on resampled timestamps
     z_map = {ph: {} for ph in phases}
 
-    for df, label in feeders:
+    for i, df in enumerate(feeders):
+        label = f"Feeder {i}"
         df = df.copy()
         df[time_col] = pd.to_datetime(df[time_col])
         idx = df[time_col]
