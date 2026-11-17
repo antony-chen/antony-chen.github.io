@@ -290,12 +290,10 @@ def average_phase_profiles(feeders,
     Returns
     -------
     avg_df : pd.DataFrame
-        Index = timestamps, one column per phase present in the data.
-        Values are the mean z-score-normalised voltage shape.
-    mismatch_df : pd.DataFrame
-        One row per (feeder, phase) combination whose shape r < threshold.
-        Columns: feeder, phase, r, n_overlap.
-        Empty DataFrame if every series matches.
+        Long-format DataFrame in the same shape as the input, with columns
+        time_col, phase_col, voltage_col (mean z-score-normalised shape),
+        and mismatch_feeders (comma-separated list of feeders whose phase
+        shape r < mismatch_r_threshold; empty string when all match).
     """
     phases = sorted(DECODE.values())  # ["A", "B", "C"]
 
@@ -343,24 +341,18 @@ def average_phase_profiles(feeders,
         avg_cols[ph] = combined.mean(axis=1)
 
     if not avg_cols:
-        return pd.DataFrame(columns=[time_col, voltage_col, phase_col]), \
-               pd.DataFrame(columns=["feeder", "phase", "r", "n_overlap"])
+        return pd.DataFrame(columns=[time_col, voltage_col, phase_col, "mismatch_feeders"])
 
-    # Build a wide DataFrame internally for mismatch checks, then melt to
-    # long format matching the input shape (time_col, voltage_col, phase_col).
+    # Build wide internally for mismatch checks, then melt to long format
+    # matching the input shape (time_col, voltage_col, phase_col).
     avg_wide = pd.DataFrame(avg_cols).sort_index()
     avg_wide.index.name = time_col
-    avg_df = (avg_wide
-              .reset_index()
-              .melt(id_vars=time_col, var_name=phase_col, value_name=voltage_col)
-              .dropna(subset=[voltage_col])
-              .sort_values([time_col, phase_col])
-              .reset_index(drop=True))
 
     # ------------------------------------------------------------------ #
     # Step 3 – flag feeders whose shape deviates from the group average   #
     # ------------------------------------------------------------------ #
-    mismatch_rows = []
+    # mismatch_phases[ph] = list of feeder labels that don't match
+    mismatch_phases = {ph: [] for ph in phases}
     for ph in phases:
         if ph not in avg_wide.columns or not z_map[ph]:
             continue
@@ -371,33 +363,38 @@ def average_phase_profiles(feeders,
                 continue
             r = _corr(avg_series.reindex(common), z.reindex(common))
             if np.isnan(r) or r < mismatch_r_threshold:
-                mismatch_rows.append({
-                    "feeder":    label,
-                    "phase":     ph,
-                    "r":         round(float(r), 4),
-                    "n_overlap": len(common),
-                })
+                mismatch_phases[ph].append((label, round(float(r), 4)))
 
-    mismatch_df = pd.DataFrame(mismatch_rows,
-                               columns=["feeder", "phase", "r", "n_overlap"])
+    # Melt to long format; add mismatch_feeders column (comma-separated
+    # "Feeder N (r=x.xx)" entries, or empty string when all match).
+    avg_df = (avg_wide
+              .reset_index()
+              .melt(id_vars=time_col, var_name=phase_col, value_name=voltage_col)
+              .dropna(subset=[voltage_col])
+              .sort_values([time_col, phase_col])
+              .reset_index(drop=True))
+
+    avg_df["mismatch_feeders"] = avg_df[phase_col].map(
+        lambda ph: ", ".join(f"{lbl} (r={r:.2f})"
+                             for lbl, r in mismatch_phases.get(ph, []))
+    )
 
     # ------------------------------------------------------------------ #
     # Step 4 – print summary                                              #
     # ------------------------------------------------------------------ #
     n_feeders = len(feeders)
+    n_mismatches = sum(len(v) for v in mismatch_phases.values())
     print(f"average_phase_profiles: {n_feeders} feeder(s), "
           f"phases present: {list(avg_wide.columns)}")
-    if mismatch_df.empty:
-        print("  No shape mismatches detected "
-              f"(threshold r >= {mismatch_r_threshold}).")
+    if n_mismatches == 0:
+        print(f"  No shape mismatches detected (threshold r >= {mismatch_r_threshold}).")
     else:
-        print(f"  {len(mismatch_df)} mismatch(es) "
-              f"(r < {mismatch_r_threshold}):")
-        for _, row in mismatch_df.iterrows():
-            print(f"    feeder={row['feeder']}  phase={row['phase']}  "
-                  f"r={row['r']:.4f}  n={row['n_overlap']}")
+        print(f"  {n_mismatches} mismatch(es) (r < {mismatch_r_threshold}):")
+        for ph, entries in mismatch_phases.items():
+            for lbl, r in entries:
+                print(f"    feeder={lbl}  phase={ph}  r={r:.4f}")
 
-    return avg_df, mismatch_df
+    return avg_df
 
 
 def plot_phase_voltages(df1, df2, phase1, phase2=None,
