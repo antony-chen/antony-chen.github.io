@@ -267,6 +267,128 @@ def plot_voltage_profiles(devices,
     return corr
 
 
+def average_phase_profiles(feeders,
+                           time_col="timestamp_cst",
+                           voltage_col="DATA",
+                           phase_col="PHASE_CHILD",
+                           resample_freq="15min",
+                           mismatch_r_threshold=0.70):
+    """
+    Average the z-score-normalised voltage shape across feeders for each phase.
+
+    Parameters
+    ----------
+    feeders : list of (df, label)
+        Each df is a raw feeder DataFrame containing columns for time, voltage,
+        and phase.  label is a human-readable name used in the mismatch report.
+    time_col, voltage_col, phase_col : column names
+    resample_freq : resampling frequency applied before averaging
+    mismatch_r_threshold : Pearson r below this value flags a feeder's phase
+        profile as not matching the group average shape
+
+    Returns
+    -------
+    avg_df : pd.DataFrame
+        Index = timestamps (union of all resampled times), one column per phase.
+        Values are the mean z-score-normalised voltage shape.
+    mismatch_df : pd.DataFrame
+        One row per (feeder, phase) combination whose shape r < threshold.
+        Columns: feeder, phase, r, n_overlap.
+        Empty DataFrame if every series matches.
+    """
+    phases = sorted(DECODE.values())  # ["A", "B", "C"]
+
+    # ------------------------------------------------------------------ #
+    # Step 1 – build a z-scored series per (feeder, phase)                #
+    # ------------------------------------------------------------------ #
+    # z_map[phase][label] = z-scored pd.Series on resampled timestamps
+    z_map = {ph: {} for ph in phases}
+
+    for df, label in feeders:
+        df = df.copy()
+        df[time_col] = pd.to_datetime(df[time_col])
+        idx = df[time_col]
+        if idx.dt.tz is not None:
+            df[time_col] = idx.dt.tz_convert("UTC").dt.tz_localize(None)
+
+        for ph in phases:
+            subset = df[(df[phase_col] == ph) &
+                        df[voltage_col].notna() &
+                        (df[voltage_col] > 0)]
+            if subset.empty:
+                continue
+            s = (_drop_outliers(subset.groupby(time_col)[voltage_col]
+                                      .mean()
+                                      .sort_index())
+                 .resample(resample_freq).mean()
+                 .dropna())
+            if len(s) < 2:
+                continue
+            sigma = s.std()
+            z = (s - s.mean()) / sigma if sigma > 0 else s - s.mean()
+            z_map[ph][label] = z
+
+    # ------------------------------------------------------------------ #
+    # Step 2 – average the z-scored shapes per phase                      #
+    # ------------------------------------------------------------------ #
+    avg_cols = {}
+    for ph in phases:
+        if not z_map[ph]:
+            continue
+        combined = pd.concat(z_map[ph].values(), axis=1,
+                             keys=z_map[ph].keys())
+        # row-wise mean (ignores NaN from non-overlapping timestamps)
+        avg_cols[ph] = combined.mean(axis=1)
+
+    if not avg_cols:
+        return pd.DataFrame(), pd.DataFrame(columns=["feeder", "phase", "r", "n_overlap"])
+
+    avg_df = pd.DataFrame(avg_cols).sort_index()
+    avg_df.index.name = time_col
+
+    # ------------------------------------------------------------------ #
+    # Step 3 – flag feeders whose shape deviates from the group average   #
+    # ------------------------------------------------------------------ #
+    mismatch_rows = []
+    for ph in phases:
+        if ph not in avg_df.columns or not z_map[ph]:
+            continue
+        avg_series = avg_df[ph].dropna()
+        for label, z in z_map[ph].items():
+            common = avg_series.index.intersection(z.index)
+            if len(common) < 2:
+                continue
+            r = _corr(avg_series.reindex(common), z.reindex(common))
+            if np.isnan(r) or r < mismatch_r_threshold:
+                mismatch_rows.append({
+                    "feeder":    label,
+                    "phase":     ph,
+                    "r":         round(float(r), 4),
+                    "n_overlap": len(common),
+                })
+
+    mismatch_df = pd.DataFrame(mismatch_rows,
+                               columns=["feeder", "phase", "r", "n_overlap"])
+
+    # ------------------------------------------------------------------ #
+    # Step 4 – print summary                                              #
+    # ------------------------------------------------------------------ #
+    n_feeders = len(feeders)
+    print(f"average_phase_profiles: {n_feeders} feeder(s), "
+          f"phases present: {list(avg_df.columns)}")
+    if mismatch_df.empty:
+        print("  No shape mismatches detected "
+              f"(threshold r >= {mismatch_r_threshold}).")
+    else:
+        print(f"  {len(mismatch_df)} mismatch(es) "
+              f"(r < {mismatch_r_threshold}):")
+        for _, row in mismatch_df.iterrows():
+            print(f"    feeder={row['feeder']}  phase={row['phase']}  "
+                  f"r={row['r']:.4f}  n={row['n_overlap']}")
+
+    return avg_df, mismatch_df
+
+
 def plot_phase_voltages(df1, df2, phase1, phase2=None,
                         time_col="timestamp_cst",
                         voltage_col="DATA",
